@@ -147,7 +147,7 @@ jobs:
             "$DMG"
 
       - name: Upload validated macOS release package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: community-macOS-AppleSilicon
           path: release/*
@@ -221,7 +221,7 @@ jobs:
           python scripts/make_release_manifest.py --version $version --platform Windows --arch x64 --status community-validated --output ".\release\WGMapBackporterStudio-$version-Windows-x64.verification.json" $installer
 
       - name: Upload validated Windows release package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: community-Windows-x64
           path: release/*

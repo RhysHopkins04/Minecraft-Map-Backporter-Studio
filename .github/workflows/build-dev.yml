@@ -102,7 +102,7 @@ jobs:
             "$DMG"
 
       - name: Upload macOS development package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: DEV-${{ github.run_number }}-${{ needs.preflight.outputs.short_sha }}-macOS-AppleSilicon
           path: release/*
@@ -177,7 +177,7 @@ jobs:
           python scripts/make_release_manifest.py --version $version --platform Windows --arch x64 --status dev-validated --output ".\release\WGMapBackporterStudio-$version-$env:WGB_BUILD_ID-Windows-x64.verification.json" $installer
 
       - name: Upload Windows development package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: DEV-${{ github.run_number }}-${{ needs.preflight.outputs.short_sha }}-Windows-x64
           path: release/*
