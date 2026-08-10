@@ -345,20 +345,27 @@ for token in [
         error(f"Map Backporter cross-platform layout invariant missing: {token}")
 
 for token in [
+    "class _AdaptiveHeaderTable(QTableWidget)",
     "def _configure_resizable_columns",
+    "_HEADER_TEXT_ALLOWANCE = 42",
+    "_HEADER_COMFORT_MARGIN = 14",
+    "_HEADER_ABSOLUTE_FLOOR = 72",
     "header.setSectionResizeMode(QHeaderView.Interactive)",
     "QFontMetrics(header.font())",
-    "metrics.horizontalAdvance(label) + 52",
+    "metrics.horizontalAdvance(label) + _HEADER_TEXT_ALLOWANCE",
+    "preferreds = tuple(width + _HEADER_COMFORT_MARGIN for width in minimums)",
+    "available = max(0, table.viewport().width() - 2)",
+    "fraction = (available - minimum_total) / max(1, preferred_total - minimum_total)",
     "header.sectionResized.connect(keep_readable)",
-    "header.resizeSection(index, minimums[index])",
+    "table._wg_fit_header_columns = fit_columns_to_view",
     "table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)",
     "table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)",
     'jar_labels = ("Registry hint", "Display name", "Confidence", "Evidence", "Textures", "Models")',
     'modpack_labels = ("Mod", "Mod IDs", "Version", "Loader", "Block candidates", "Source")',
     'catalog_labels = ("Registry", "Display", "Mod", "Confidence", "Evidence", "Texture assets")',
-    "(145, 150, 125, 135, 105, 95)",
-    "(105, 115, 105, 100, 165, 120)",
-    "(120, 120, 95, 125, 120, 150)",
+    "_configure_resizable_columns(self.table, jar_labels)",
+    "_configure_resizable_columns(self.table, modpack_labels)",
+    "_configure_resizable_columns(self.table, catalog_labels)",
     "splitter.setChildrenCollapsible(False)",
 ]:
     if token not in main_window:

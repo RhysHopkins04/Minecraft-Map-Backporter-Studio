@@ -52,21 +52,33 @@ def _title(text: str, subtitle: str) -> QVBoxLayout:
 
 
 
+class _AdaptiveHeaderTable(QTableWidget):
+    """QTableWidget that refits analyzer columns when the viewport width changes."""
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        fitter = getattr(self, "_wg_fit_header_columns", None)
+        if fitter is not None:
+            fitter()
+
+
+_HEADER_TEXT_ALLOWANCE = 42
+_HEADER_COMFORT_MARGIN = 14
+_HEADER_ABSOLUTE_FLOOR = 72
+
+
 def _configure_resizable_columns(
     table: QTableWidget,
     labels: tuple[str, ...],
-    preferred_widths: tuple[int, ...],
-    floor_widths: tuple[int, ...],
 ) -> None:
-    """Keep analyzer headings readable while preserving manual column resizing.
+    """Keep analyzer headings compact, readable, and responsive.
 
-    Qt only exposes a single global minimum section size. The analyzer tables need
-    per-column minimums because long headings (and the active sort indicator) need
-    more room than short headings such as ``Mod`` or ``Loader``.
+    Every column uses the same text-relative policy: enough room for the rendered
+    heading plus Qt's sort indicator/padding, then a small consistent comfort
+    margin. Columns automatically contract toward that readable minimum when the
+    window narrows and use horizontal scrolling only when the minimums cannot fit.
+    Users can still resize columns manually, but not below the readable floor.
     """
-    if not (len(labels) == len(preferred_widths) == len(floor_widths)):
-        raise ValueError("Analyzer table column policy length mismatch")
-
     table.setHorizontalHeaderLabels(list(labels))
     table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
     table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
@@ -74,18 +86,20 @@ def _configure_resizable_columns(
     header = table.horizontalHeader()
     header.setSectionResizeMode(QHeaderView.Interactive)
     header.setStretchLastSection(False)
-    header.setMinimumSectionSize(min(floor_widths))
     header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
     metrics = QFontMetrics(header.font())
-    # Reserve room for stylesheet padding plus Qt's sort indicator on whichever
-    # column is active. This keeps the arrow from colliding with the heading.
     minimums = tuple(
-        max(floor, metrics.horizontalAdvance(label) + 52)
-        for label, floor in zip(labels, floor_widths)
+        max(_HEADER_ABSOLUTE_FLOOR, metrics.horizontalAdvance(label) + _HEADER_TEXT_ALLOWANCE)
+        for label in labels
     )
-    table._wg_header_minimums = minimums  # keep policy alive/introspectable
+    preferreds = tuple(width + _HEADER_COMFORT_MARGIN for width in minimums)
+
+    header.setMinimumSectionSize(min(minimums))
+    table._wg_header_minimums = minimums
+    table._wg_header_preferreds = preferreds
     clamp_guard = {"active": False}
+    fit_guard = {"active": False}
 
     def keep_readable(index: int, _old_size: int, new_size: int) -> None:
         if clamp_guard["active"] or index >= len(minimums) or new_size >= minimums[index]:
@@ -96,9 +110,34 @@ def _configure_resizable_columns(
         finally:
             clamp_guard["active"] = False
 
+    def fit_columns_to_view() -> None:
+        if fit_guard["active"]:
+            return
+        fit_guard["active"] = True
+        try:
+            available = max(0, table.viewport().width() - 2)
+            minimum_total = sum(minimums)
+            preferred_total = sum(preferreds)
+
+            if available <= minimum_total:
+                widths = minimums
+            elif available >= preferred_total:
+                widths = preferreds
+            else:
+                fraction = (available - minimum_total) / max(1, preferred_total - minimum_total)
+                widths = tuple(
+                    minimum + round((preferred - minimum) * fraction)
+                    for minimum, preferred in zip(minimums, preferreds)
+                )
+
+            for index, width in enumerate(widths):
+                header.resizeSection(index, width)
+        finally:
+            fit_guard["active"] = False
+
     header.sectionResized.connect(keep_readable)
-    for index, preferred in enumerate(preferred_widths):
-        header.resizeSection(index, max(preferred, minimums[index]))
+    table._wg_fit_header_columns = fit_columns_to_view
+    fit_columns_to_view()
 
 
 def _path_row(parent, label: str, mode: str, target: QLineEdit, file_filter: str = "All files (*)"):
@@ -340,13 +379,9 @@ class JarAnalyzerTab(AsyncTab):
         top.addWidget(browse); top.addWidget(analyze); root.addLayout(top)
         self.summary = _muted("No JAR analyzed yet."); root.addWidget(self.summary)
         splitter = QSplitter(Qt.Horizontal)
-        self.table = QTableWidget(0, 6)
+        self.table = _AdaptiveHeaderTable(0, 6)
         jar_labels = ("Registry hint", "Display name", "Confidence", "Evidence", "Textures", "Models")
-        _configure_resizable_columns(
-            self.table, jar_labels,
-            (180, 190, 130, 220, 115, 105),
-            (145, 150, 125, 135, 105, 95),
-        )
+        _configure_resizable_columns(self.table, jar_labels)
         self.table.setSelectionBehavior(QTableWidget.SelectRows); self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True)
         splitter.addWidget(self.table)
         side = QWidget(); sl = QVBoxLayout(side); self.preview = QLabel("Select a block to preview its first packaged texture."); self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumSize(250, 250); self.preview.setWordWrap(True)
@@ -409,13 +444,9 @@ class ModpackAnalyzerTab(AsyncTab):
         top.addWidget(self.path, 1); browse_folder = QPushButton("Folder…"); browse_zip = QPushButton("ZIP…"); run = QPushButton("Analyze modpack"); run.setObjectName("primary")
         top.addWidget(browse_folder); top.addWidget(browse_zip); top.addWidget(run); root.addLayout(top)
         self.summary = _muted("No modpack analyzed yet."); root.addWidget(self.summary)
-        self.table = QTableWidget(0, 6)
+        self.table = _AdaptiveHeaderTable(0, 6)
         modpack_labels = ("Mod", "Mod IDs", "Version", "Loader", "Block candidates", "Source")
-        _configure_resizable_columns(
-            self.table, modpack_labels,
-            (220, 155, 120, 115, 175, 310),
-            (105, 115, 105, 100, 165, 120),
-        )
+        _configure_resizable_columns(self.table, modpack_labels)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True); root.addWidget(self.table, 1)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(170); root.addWidget(self.log)
         bottom = QHBoxLayout(); self.export = QPushButton("Export combined analysis…"); self.export.setEnabled(False); bottom.addStretch(); bottom.addWidget(self.export); root.addLayout(bottom)
@@ -458,13 +489,9 @@ class CatalogTab(QWidget):
         ))
         top = QHBoxLayout(); self.path = QLineEdit(); self.path.setReadOnly(True); load = QPushButton("Load catalog…"); self.search = QLineEdit(); self.search.setPlaceholderText("Search registry, display name, mod or evidence…")
         top.addWidget(self.path, 1); top.addWidget(load); top.addWidget(self.search, 1); root.addLayout(top)
-        self.table = QTableWidget(0, 6)
+        self.table = _AdaptiveHeaderTable(0, 6)
         catalog_labels = ("Registry", "Display", "Mod", "Confidence", "Evidence", "Texture assets")
-        _configure_resizable_columns(
-            self.table, catalog_labels,
-            (225, 220, 125, 135, 265, 155),
-            (120, 120, 95, 125, 120, 150),
-        )
+        _configure_resizable_columns(self.table, catalog_labels)
         self.table.setSortingEnabled(True); root.addWidget(self.table, 1)
         load.clicked.connect(self._load); self.search.textChanged.connect(self._filter)
     def _load(self):
