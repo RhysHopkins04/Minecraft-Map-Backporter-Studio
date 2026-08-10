@@ -47,6 +47,7 @@ required = [
     "packaging/macos/verify_community_dmg.sh",
     "packaging/windows/WGMapBackporterStudio.iss",
     "packaging/windows/install_smoke_test.ps1",
+    "packaging/windows/verify_packaged_exe.ps1",
     "packaging/windows/version_info.txt",
     "resources/app_icon.icns",
     "resources/app_icon.ico",
@@ -190,6 +191,26 @@ for token in [
     if token not in dev:
         error(f"development build workflow missing: {token}")
 
+
+# Routine dependency version updates should flow through dev without creating
+# unnecessary pip lower-bound churn. Security updates remain repository-managed
+# and target the default branch independently of this version-update policy.
+dependabot_path = root / ".github/dependabot.yml"
+dependabot = dependabot_path.read_text(encoding="utf-8") if dependabot_path.exists() else ""
+if re.search(r'package-ecosystem:\s*["\']?pip["\']?', dependabot):
+    error("Dependabot routine pip version updates must remain disabled; security updates are managed separately")
+if len(re.findall(r'package-ecosystem:\s*["\']?github-actions["\']?', dependabot)) != 1:
+    error("Dependabot must contain exactly one github-actions version-update entry")
+for token in [
+    'target-branch: "dev"',
+    'interval: "weekly"',
+    'open-pull-requests-limit: 2',
+    'github-actions:',
+    '- "*"',
+]:
+    if token not in dependabot:
+        error(f"Dependabot GitHub Actions policy missing: {token}")
+
 manifest_path = root / "scripts/make_release_manifest.py"
 manifest = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else ""
 for token in ['"community-validated"', '"dev-validated"']:
@@ -217,9 +238,21 @@ for forbidden in ["SignTool=releaseSigner", "SignedUninstaller=yes"]:
     if forbidden in iss:
         error(f"Windows community installer still requires signing: {forbidden}")
 
+win_packaged_path = root / "packaging/windows/verify_packaged_exe.ps1"
+win_packaged = win_packaged_path.read_text(encoding="utf-8") if win_packaged_path.exists() else ""
+for token in ["Start-Process", "-Wait", "-PassThru", "ExitCode", "--self-test"]:
+    if token not in win_packaged:
+        error(f"Windows packaged executable verifier missing: {token}")
+
+for workflow_name, workflow_text in [("development", dev), ("community release", workflow)]:
+    if "verify_packaged_exe.ps1" not in workflow_text:
+        error(f"{workflow_name} workflow does not use the synchronous Windows packaged executable verifier")
+    if '$LASTEXITCODE -ne 0' in workflow_text:
+        error(f"{workflow_name} workflow still performs a direct GUI executable LASTEXITCODE check")
+
 win_smoke_path = root / "packaging/windows/install_smoke_test.ps1"
 win_smoke = win_smoke_path.read_text(encoding="utf-8") if win_smoke_path.exists() else ""
-for token in ["--self-test", "unins*.exe", "Executable remained after uninstall"]:
+for token in ["verify_packaged_exe.ps1", "unins*.exe", "Executable remained after uninstall"]:
     if token not in win_smoke:
         error(f"Windows install smoke test missing: {token}")
 if "Get-AuthenticodeSignature" in win_smoke:

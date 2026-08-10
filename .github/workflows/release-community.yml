@@ -185,9 +185,7 @@ jobs:
 
       - name: Run packaged application self-test
         shell: pwsh
-        run: |
-          & ".\dist\WGMapBackporterStudio\WGMapBackporterStudio.exe" --self-test
-          if ($LASTEXITCODE -ne 0) { throw "Packaged executable self-test failed" }
+        run: .\packaging\windows\verify_packaged_exe.ps1 -Executable ".\dist\WGMapBackporterStudio\WGMapBackporterStudio.exe"
 
       - name: Configure installer build
         shell: pwsh
