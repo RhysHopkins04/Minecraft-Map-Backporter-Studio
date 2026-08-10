@@ -316,8 +316,11 @@ main_window = main_window_path.read_text(encoding="utf-8") if main_window_path.e
 for token in [
     "QScrollArea",
     "QSizePolicy",
+    'scroll.setObjectName("backportScroll")',
     "scroll.setWidgetResizable(True)",
     "scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)",
+    'scroll.viewport().setObjectName("backportScrollViewport")',
+    'scroll_body.setObjectName("backportScrollBody")',
     "scroll_body.setMinimumHeight(610)",
     "form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)",
     "form.setRowWrapPolicy(QFormLayout.DontWrapRows)",
@@ -335,6 +338,8 @@ for token in [
     "self.yoff.setMaximumWidth(180)",
     "self.strip.setMaximumWidth(180)",
     "self.log.setMinimumHeight(150)",
+    'QCheckBox("Use safe mod architectural block replacements")',
+    "self.setMinimumSize(980, 740)",
 ]:
     if token not in main_window:
         error(f"Map Backporter cross-platform layout invariant missing: {token}")
@@ -342,10 +347,18 @@ for token in [
 for token in [
     "def _configure_resizable_columns",
     "header.setSectionResizeMode(QHeaderView.Interactive)",
-    "header.setMinimumSectionSize(76)",
-    "_configure_resizable_columns(self.table, (170, 180, 110, 210, 90, 90))",
-    "_configure_resizable_columns(self.table, (210, 150, 110, 100, 150, 300))",
-    "_configure_resizable_columns(self.table, (220, 220, 150, 110, 260, 120))",
+    "QFontMetrics(header.font())",
+    "metrics.horizontalAdvance(label) + 52",
+    "header.sectionResized.connect(keep_readable)",
+    "header.resizeSection(index, minimums[index])",
+    "table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)",
+    "table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)",
+    'jar_labels = ("Registry hint", "Display name", "Confidence", "Evidence", "Textures", "Models")',
+    'modpack_labels = ("Mod", "Mod IDs", "Version", "Loader", "Block candidates", "Source")',
+    'catalog_labels = ("Registry", "Display", "Mod", "Confidence", "Evidence", "Texture assets")',
+    "(145, 150, 125, 135, 105, 95)",
+    "(105, 115, 105, 100, 165, 120)",
+    "(120, 120, 95, 125, 120, 150)",
     "splitter.setChildrenCollapsible(False)",
 ]:
     if token not in main_window:
@@ -358,6 +371,18 @@ for forbidden in [
 ]:
     if forbidden in main_window:
         error(f"Analyzer table still locks a user-facing column to Stretch mode: {forbidden}")
+
+theme_path = root / "src/wgmap_backporter_studio/ui/theme.py"
+theme = theme_path.read_text(encoding="utf-8") if theme_path.exists() else ""
+for token in [
+    "padding: 7px 24px 7px 9px",
+    "QScrollArea#backportScroll",
+    "QWidget#backportScrollViewport",
+    "QWidget#backportScrollBody",
+    "background: #11151b",
+]:
+    if token not in theme:
+        error(f"Packaged UI theme invariant missing: {token}")
 
 win_smoke_path = root / "packaging/windows/install_smoke_test.ps1"
 win_smoke = win_smoke_path.read_text(encoding="utf-8") if win_smoke_path.exists() else ""

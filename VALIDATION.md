@@ -67,8 +67,11 @@ For the **Map Backporter** page specifically, verify that:
 - the Target version selector remains a compact selector instead of stretching across the entire form;
 - the Surface / compatibility options group retains normal row height and compact numeric inputs;
 - at short window heights the Backporter page scrolls vertically instead of crushing configuration rows;
+- the scroll viewport/body uses the same application canvas colour, with no native grey bands behind group-box titles, button rows, or progress controls;
+- the desktop minimum height keeps the normal configuration area usable while scrolling remains a fallback for constrained displays;
+- the architectural replacement option uses generic mod-facing wording while the current 1.7.10 backend continues to document its HBM mapping support;
 - at normal/tall heights the output/log panel receives the remaining vertical stretch.
 
-Also verify the **Mod / JAR Analyzer**, **Modpack Analyzer**, and **Catalog Workspace** tables at the minimum window width. Column headings such as `Registry hint`, `Block candidates`, and `Texture assets` must begin at readable widths, every column boundary must be manually resizable, and a horizontal scrollbar is preferable to crushing a heading below its useful width. The JAR Analyzer preview/table splitter must not collapse either child completely.
+Also verify the **Mod / JAR Analyzer**, **Modpack Analyzer**, and **Catalog Workspace** tables at the minimum window width. Column headings such as `Registry hint`, `Confidence`, `Block candidates`, and `Texture assets` must begin at readable widths. User resizing remains interactive, but each column has a per-column readability floor that includes room for the active sort indicator, so dragging a boundary cannot clip its heading. A horizontal scrollbar is preferable to violating those floors. The JAR Analyzer preview/table splitter must not collapse either child completely.
 
 The source verifier enforces the explicit Qt form/scroll sizing policy and interactive analyzer-header policy so these behaviours stay deterministic across platform styles.

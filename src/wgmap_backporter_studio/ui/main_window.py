@@ -8,9 +8,9 @@ import zipfile
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QApplication, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
     QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
@@ -52,14 +52,53 @@ def _title(text: str, subtitle: str) -> QVBoxLayout:
 
 
 
-def _configure_resizable_columns(table: QTableWidget, widths: tuple[int, ...]) -> None:
-    """Give analyzer tables readable defaults without locking user resizing."""
+def _configure_resizable_columns(
+    table: QTableWidget,
+    labels: tuple[str, ...],
+    preferred_widths: tuple[int, ...],
+    floor_widths: tuple[int, ...],
+) -> None:
+    """Keep analyzer headings readable while preserving manual column resizing.
+
+    Qt only exposes a single global minimum section size. The analyzer tables need
+    per-column minimums because long headings (and the active sort indicator) need
+    more room than short headings such as ``Mod`` or ``Loader``.
+    """
+    if not (len(labels) == len(preferred_widths) == len(floor_widths)):
+        raise ValueError("Analyzer table column policy length mismatch")
+
+    table.setHorizontalHeaderLabels(list(labels))
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+
     header = table.horizontalHeader()
     header.setSectionResizeMode(QHeaderView.Interactive)
-    header.setMinimumSectionSize(76)
     header.setStretchLastSection(False)
-    for index, width in enumerate(widths):
-        table.setColumnWidth(index, width)
+    header.setMinimumSectionSize(min(floor_widths))
+    header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+    metrics = QFontMetrics(header.font())
+    # Reserve room for stylesheet padding plus Qt's sort indicator on whichever
+    # column is active. This keeps the arrow from colliding with the heading.
+    minimums = tuple(
+        max(floor, metrics.horizontalAdvance(label) + 52)
+        for label, floor in zip(labels, floor_widths)
+    )
+    table._wg_header_minimums = minimums  # keep policy alive/introspectable
+    clamp_guard = {"active": False}
+
+    def keep_readable(index: int, _old_size: int, new_size: int) -> None:
+        if clamp_guard["active"] or index >= len(minimums) or new_size >= minimums[index]:
+            return
+        clamp_guard["active"] = True
+        try:
+            header.resizeSection(index, minimums[index])
+        finally:
+            clamp_guard["active"] = False
+
+    header.sectionResized.connect(keep_readable)
+    for index, preferred in enumerate(preferred_widths):
+        header.resizeSection(index, max(preferred, minimums[index]))
 
 
 def _path_row(parent, label: str, mode: str, target: QLineEdit, file_filter: str = "All files (*)"):
@@ -160,10 +199,16 @@ class BackportTab(AsyncTab):
         # outer window is vertically constrained. Short windows scroll this
         # page instead of asking Qt to crush form rows into one another.
         scroll = QScrollArea(self)
+        scroll.setObjectName("backportScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # QScrollArea owns a viewport widget that otherwise picks up a native
+        # macOS panel background. Keep the viewport/body on the application
+        # canvas so group-box title margins and button rows do not show grey bars.
+        scroll.viewport().setObjectName("backportScrollViewport")
         scroll_body = QWidget(scroll)
+        scroll_body.setObjectName("backportScrollBody")
         body = QVBoxLayout(scroll_body)
         body.setContentsMargins(0, 0, 0, 0)
 
@@ -214,8 +259,8 @@ class BackportTab(AsyncTab):
         og.setColumnStretch(1, 1)
         og.setHorizontalSpacing(12)
         og.setVerticalSpacing(8)
-        self.hbm = QCheckBox("Use safe HBM architectural replacements"); self.hbm.setChecked(True)
-        self.hbm.setToolTip("Only architectural/decorative substitutes are selected; machines, ores and valuable resource blocks are intentionally excluded.")
+        self.hbm = QCheckBox("Use safe mod architectural block replacements"); self.hbm.setChecked(True)
+        self.hbm.setToolTip("Use only configured architectural/decorative mod substitutes; machines, ores and valuable resource blocks are excluded. The current 1.7.10 backend includes HBM architectural mappings.")
         self.yoff = QSpinBox(); self.yoff.setRange(-192, 192); self.yoff.setSingleStep(16); self.yoff.setValue(0); self.yoff.setMaximumWidth(180)
         self.strip = QSpinBox(); self.strip.setRange(0, 255); self.strip.setValue(0); self.strip.setMaximumWidth(180)
         og.addWidget(self.hbm, 0, 0, 1, 2); og.addWidget(QLabel("Vertical offset"), 1, 0); og.addWidget(self.yoff, 1, 1)
@@ -295,8 +340,13 @@ class JarAnalyzerTab(AsyncTab):
         top.addWidget(browse); top.addWidget(analyze); root.addLayout(top)
         self.summary = _muted("No JAR analyzed yet."); root.addWidget(self.summary)
         splitter = QSplitter(Qt.Horizontal)
-        self.table = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["Registry hint", "Display name", "Confidence", "Evidence", "Textures", "Models"])
-        _configure_resizable_columns(self.table, (170, 180, 110, 210, 90, 90))
+        self.table = QTableWidget(0, 6)
+        jar_labels = ("Registry hint", "Display name", "Confidence", "Evidence", "Textures", "Models")
+        _configure_resizable_columns(
+            self.table, jar_labels,
+            (180, 190, 130, 220, 115, 105),
+            (145, 150, 125, 135, 105, 95),
+        )
         self.table.setSelectionBehavior(QTableWidget.SelectRows); self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True)
         splitter.addWidget(self.table)
         side = QWidget(); sl = QVBoxLayout(side); self.preview = QLabel("Select a block to preview its first packaged texture."); self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumSize(250, 250); self.preview.setWordWrap(True)
@@ -359,8 +409,13 @@ class ModpackAnalyzerTab(AsyncTab):
         top.addWidget(self.path, 1); browse_folder = QPushButton("Folder…"); browse_zip = QPushButton("ZIP…"); run = QPushButton("Analyze modpack"); run.setObjectName("primary")
         top.addWidget(browse_folder); top.addWidget(browse_zip); top.addWidget(run); root.addLayout(top)
         self.summary = _muted("No modpack analyzed yet."); root.addWidget(self.summary)
-        self.table = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["Mod", "Mod IDs", "Version", "Loader", "Block candidates", "Source"])
-        _configure_resizable_columns(self.table, (210, 150, 110, 100, 150, 300))
+        self.table = QTableWidget(0, 6)
+        modpack_labels = ("Mod", "Mod IDs", "Version", "Loader", "Block candidates", "Source")
+        _configure_resizable_columns(
+            self.table, modpack_labels,
+            (220, 155, 120, 115, 175, 310),
+            (105, 115, 105, 100, 165, 120),
+        )
         self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True); root.addWidget(self.table, 1)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(170); root.addWidget(self.log)
         bottom = QHBoxLayout(); self.export = QPushButton("Export combined analysis…"); self.export.setEnabled(False); bottom.addStretch(); bottom.addWidget(self.export); root.addLayout(bottom)
@@ -403,8 +458,14 @@ class CatalogTab(QWidget):
         ))
         top = QHBoxLayout(); self.path = QLineEdit(); self.path.setReadOnly(True); load = QPushButton("Load catalog…"); self.search = QLineEdit(); self.search.setPlaceholderText("Search registry, display name, mod or evidence…")
         top.addWidget(self.path, 1); top.addWidget(load); top.addWidget(self.search, 1); root.addLayout(top)
-        self.table = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["Registry", "Display", "Mod", "Confidence", "Evidence", "Texture assets"])
-        _configure_resizable_columns(self.table, (220, 220, 150, 110, 260, 120)); self.table.setSortingEnabled(True); root.addWidget(self.table, 1)
+        self.table = QTableWidget(0, 6)
+        catalog_labels = ("Registry", "Display", "Mod", "Confidence", "Evidence", "Texture assets")
+        _configure_resizable_columns(
+            self.table, catalog_labels,
+            (225, 220, 125, 135, 265, 155),
+            (120, 120, 95, 125, 120, 150),
+        )
+        self.table.setSortingEnabled(True); root.addWidget(self.table, 1)
         load.clicked.connect(self._load); self.search.textChanged.connect(self._filter)
     def _load(self):
         p, _ = QFileDialog.getOpenFileName(self, "Load block catalog", str(Path.home()), "JSON (*.json);;All files (*)")
@@ -431,7 +492,7 @@ class CatalogTab(QWidget):
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle(f"{APP_NAME} {__version__}"); self.resize(1260, 820); self.setMinimumSize(980, 660)
+        super().__init__(); self.setWindowTitle(f"{APP_NAME} {__version__}"); self.resize(1260, 820); self.setMinimumSize(980, 740)
         root = QWidget(); root.setObjectName("rootWindow"); layout = QVBoxLayout(root); layout.setContentsMargins(18, 16, 18, 12)
         header = QHBoxLayout(); brand = QLabel(APP_NAME); brand.setObjectName("sectionTitle"); header.addWidget(brand); header.addStretch(); header.addWidget(_muted(f"v{__version__}")); layout.addLayout(header)
         tabs = QTabWidget(); tabs.setDocumentMode(True); tabs.addTab(DashboardTab(), "Overview"); tabs.addTab(BackportTab(), "Map Backporter"); tabs.addTab(JarAnalyzerTab(), "Mod / JAR Analyzer"); tabs.addTab(ModpackAnalyzerTab(), "Modpack Analyzer"); tabs.addTab(CatalogTab(), "Catalog Workspace"); layout.addWidget(tabs, 1)

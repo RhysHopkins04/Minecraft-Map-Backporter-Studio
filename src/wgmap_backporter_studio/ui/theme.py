@@ -42,7 +42,8 @@ QPushButton#danger { background: #7b3030; }
 QTabWidget::pane { border: 1px solid #27313d; border-radius: 8px; top: -1px; }
 QTabBar::tab { background: #151b23; color: #aeb9c6; padding: 10px 16px; border: 1px solid #27313d; }
 QTabBar::tab:selected { background: #1e2732; color: #ffffff; border-bottom-color: #1e2732; }
-QHeaderView::section { background: #1d2530; color: #dfe7f1; padding: 7px; border: 0; border-right: 1px solid #303b48; }
+QHeaderView::section { background: #1d2530; color: #dfe7f1; padding: 7px 24px 7px 9px; border: 0; border-right: 1px solid #303b48; }
+QScrollArea#backportScroll, QWidget#backportScrollViewport, QWidget#backportScrollBody { background: #11151b; border: 0; }
 QProgressBar { background: #0e1319; border: 1px solid #303b48; border-radius: 6px; text-align: center; color: #dfe7f1; }
 QProgressBar::chunk { background: #2677c9; border-radius: 5px; }
 QCheckBox { spacing: 8px; }
