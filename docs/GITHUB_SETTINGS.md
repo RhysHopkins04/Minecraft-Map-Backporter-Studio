@@ -52,7 +52,7 @@ The Community Release workflow declares its own narrow `contents: write` permiss
 
 Recommended repository default: **30 days**.
 
-The development-build workflow explicitly sets its downloadable development installers to **14 days**. Release installers are uploaded to GitHub Releases and are not dependent on temporary Actions artifact retention.
+Development installers use a **7-day fallback retention**, but after a successful native build the workflow automatically deletes older `DEV-*` artifacts and keeps only the newest successful macOS/Windows pair. Community-release staging artifacts use a **3-day fallback retention** and are deleted after the GitHub Release is successfully published; the published Release assets remain available independently of Actions artifact storage.
 
 ## 3. Security settings
 
@@ -70,7 +70,7 @@ Recommended:
 
 Do not make CodeQL a required merge check until its first scans have completed successfully.
 
-The repository includes `.github/dependabot.yml` so routine pip and GitHub Actions dependency update PRs can be proposed weekly.
+The repository includes `.github/dependabot.yml` so routine GitHub Actions dependency updates are proposed weekly against `dev`. Routine pip version-update PRs are intentionally disabled; vulnerability-driven Dependabot security updates remain separate.
 
 ## 4. Branch creation order
 
@@ -167,7 +167,10 @@ A push to `dev` triggers:
 3. Native Windows x64 packaging on GitHub's Windows runner.
 4. Packaged self-tests.
 5. DMG / installer validation.
-6. Temporary downloadable Actions artifacts retained for 14 days.
+6. Temporary downloadable Actions artifacts with a 7-day fallback retention.
+7. After both platform builds succeed, older `DEV-*` artifacts are deleted so only the newest successful pair is retained.
+
+History-only `main` → `dev` synchronization merges and documentation-only changes do not trigger the native development packaging workflow when GitHub reports no build-relevant changed files. Lightweight `CI` still runs on ordinary `dev` pushes.
 
 No GitHub Release or permanent version tag is created.
 
@@ -176,6 +179,8 @@ No GitHub Release or permanent version tag is created.
 A normal `main` push always runs release preflight but publishes only when the release version was intentionally advanced.
 
 The version is tracked in `release/VERSION` and must match the application/package metadata. When a release PR changes that version and is merged from `dev` to `main`, the Community Release workflow builds both platforms and only publishes after both validation manifests report `community-validated`.
+
+After both release packages have been published as GitHub Release assets, the workflow removes the temporary `community-*` Actions artifacts from that run. If publication fails, cleanup does not run and the temporary artifacts remain available until their 3-day fallback expiration.
 
 The first `0.4.1` release is deliberately special: adding `release/VERSION` in Repository Patch 001 does **not** auto-publish. Once the `dev` pipeline is proven, the initial version can be published manually from **Actions → Community Release → Run workflow**, with `publish_current_version` enabled.
 
