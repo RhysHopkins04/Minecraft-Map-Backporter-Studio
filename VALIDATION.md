@@ -64,7 +64,11 @@ For the **Map Backporter** page specifically, verify that:
 - the Conversion job form remains left/top aligned instead of adopting platform-specific centered form geometry;
 - Source map, Target version, Backend, Template world, and Output world rows retain normal control height and do not overlap;
 - path fields expand horizontally with the page while their browse buttons remain visible;
-- the Surface / compatibility options group retains normal row height;
-- the output/log panel receives the remaining vertical stretch without crushing the configuration groups.
+- the Target version selector remains a compact selector instead of stretching across the entire form;
+- the Surface / compatibility options group retains normal row height and compact numeric inputs;
+- at short window heights the Backporter page scrolls vertically instead of crushing configuration rows;
+- at normal/tall heights the output/log panel receives the remaining vertical stretch.
 
-The source verifier enforces the explicit Qt form-growth, wrapping, alignment, size-policy, and log-minimum-height invariants that make this layout deterministic across platform styles.
+Also verify the **Mod / JAR Analyzer**, **Modpack Analyzer**, and **Catalog Workspace** tables at the minimum window width. Column headings such as `Registry hint`, `Block candidates`, and `Texture assets` must begin at readable widths, every column boundary must be manually resizable, and a horizontal scrollbar is preferable to crushing a heading below its useful width. The JAR Analyzer preview/table splitter must not collapse either child completely.
+
+The source verifier enforces the explicit Qt form/scroll sizing policy and interactive analyzer-header policy so these behaviours stay deterministic across platform styles.

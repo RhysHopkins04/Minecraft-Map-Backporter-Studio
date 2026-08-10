@@ -12,7 +12,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMainWindow,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSpinBox, QSplitter,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
     QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 )
 
@@ -49,6 +49,17 @@ def _title(text: str, subtitle: str) -> QVBoxLayout:
     box = QVBoxLayout()
     t = QLabel(text); t.setObjectName("pageTitle")
     box.addWidget(t); box.addWidget(_muted(subtitle)); return box
+
+
+
+def _configure_resizable_columns(table: QTableWidget, widths: tuple[int, ...]) -> None:
+    """Give analyzer tables readable defaults without locking user resizing."""
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(QHeaderView.Interactive)
+    header.setMinimumSectionSize(76)
+    header.setStretchLastSection(False)
+    for index, width in enumerate(widths):
+        table.setColumnWidth(index, width)
 
 
 def _path_row(parent, label: str, mode: str, target: QLineEdit, file_filter: str = "All files (*)"):
@@ -145,12 +156,24 @@ class BackportTab(AsyncTab):
             "Map Backporter",
             "Select the modern map, an older target/template world created with the exact destination modpack, and an empty output folder."
         ))
+        # Keep the configuration controls at their usable size even when the
+        # outer window is vertically constrained. Short windows scroll this
+        # page instead of asking Qt to crush form rows into one another.
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_body = QWidget(scroll)
+        body = QVBoxLayout(scroll_body)
+        body.setContentsMargins(0, 0, 0, 0)
+
         form_group = QGroupBox("Conversion job")
         # QFormLayout defaults are platform-style dependent. On macOS the native
         # defaults keep fields close to their size hints and center the form,
         # which can make this page appear vertically/horizontally collapsed.
         # Pin the layout policy so the same form geometry is used on every OS.
         form_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        form_group.setMinimumHeight(195)
         form = QFormLayout(form_group)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         form.setRowWrapPolicy(QFormLayout.DontWrapRows)
@@ -170,6 +193,9 @@ class BackportTab(AsyncTab):
         src_file.clicked.connect(choose_source_file); src_folder.clicked.connect(choose_source_folder); src_l.addWidget(src_file); src_l.addWidget(src_folder)
         form.addRow("Source map", src_wrap)
         self.version = QComboBox()
+        self.version.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.version.setMinimumWidth(220)
+        self.version.setMaximumWidth(320)
         for t in TARGETS: self.version.addItem(f"{t.version} — {t.status}", t)
         self.version.currentIndexChanged.connect(self._target_changed); form.addRow("Target version", self.version)
         self.target_status = _muted("")
@@ -179,27 +205,31 @@ class BackportTab(AsyncTab):
         form.addRow("Template world", _path_row(self, "Select target/template world", "dir", self.template))
         self.output = QLineEdit(); self.output.setPlaceholderText("New or empty output world folder")
         form.addRow("Output world", _path_row(self, "Select empty output folder", "dir", self.output))
-        root.addWidget(form_group)
+        body.addWidget(form_group)
 
         opts = QGroupBox("Surface / compatibility options")
         opts.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        opts.setMinimumHeight(150)
         og = QGridLayout(opts)
         og.setColumnStretch(1, 1)
         og.setHorizontalSpacing(12)
         og.setVerticalSpacing(8)
         self.hbm = QCheckBox("Use safe HBM architectural replacements"); self.hbm.setChecked(True)
         self.hbm.setToolTip("Only architectural/decorative substitutes are selected; machines, ores and valuable resource blocks are intentionally excluded.")
-        self.yoff = QSpinBox(); self.yoff.setRange(-192, 192); self.yoff.setSingleStep(16); self.yoff.setValue(0)
-        self.strip = QSpinBox(); self.strip.setRange(0, 255); self.strip.setValue(0)
+        self.yoff = QSpinBox(); self.yoff.setRange(-192, 192); self.yoff.setSingleStep(16); self.yoff.setValue(0); self.yoff.setMaximumWidth(180)
+        self.strip = QSpinBox(); self.strip.setRange(0, 255); self.strip.setValue(0); self.strip.setMaximumWidth(180)
         og.addWidget(self.hbm, 0, 0, 1, 2); og.addWidget(QLabel("Vertical offset"), 1, 0); og.addWidget(self.yoff, 1, 1)
         og.addWidget(QLabel("Strip/fill below target Y"), 2, 0); og.addWidget(self.strip, 2, 1)
         og.addWidget(_muted("For 1.7.10, source blocks below Y=0 or above Y=255 cannot be represented. Offset 0 preserves normal RTG/sea-level alignment."), 3, 0, 1, 2)
-        root.addWidget(opts)
+        body.addWidget(opts)
 
         buttons = QHBoxLayout(); self.scan_btn = QPushButton("Scan source"); self.convert_btn = QPushButton("Convert map"); self.convert_btn.setObjectName("primary")
-        buttons.addWidget(self.scan_btn); buttons.addStretch(); buttons.addWidget(self.convert_btn); root.addLayout(buttons)
-        self.progress = QProgressBar(); self.progress.setRange(0, 1); self.progress.setValue(0); root.addWidget(self.progress)
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(160); root.addWidget(self.log, 1)
+        buttons.addWidget(self.scan_btn); buttons.addStretch(); buttons.addWidget(self.convert_btn); body.addLayout(buttons)
+        self.progress = QProgressBar(); self.progress.setRange(0, 1); self.progress.setValue(0); body.addWidget(self.progress)
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(150); body.addWidget(self.log, 1)
+        scroll_body.setMinimumHeight(610)
+        scroll.setWidget(scroll_body)
+        root.addWidget(scroll, 1)
         self.scan_btn.clicked.connect(self.scan_source); self.convert_btn.clicked.connect(self.convert); self._target_changed()
 
     def _target_changed(self):
@@ -266,12 +296,12 @@ class JarAnalyzerTab(AsyncTab):
         self.summary = _muted("No JAR analyzed yet."); root.addWidget(self.summary)
         splitter = QSplitter(Qt.Horizontal)
         self.table = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["Registry hint", "Display name", "Confidence", "Evidence", "Textures", "Models"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch); self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        _configure_resizable_columns(self.table, (170, 180, 110, 210, 90, 90))
         self.table.setSelectionBehavior(QTableWidget.SelectRows); self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True)
         splitter.addWidget(self.table)
         side = QWidget(); sl = QVBoxLayout(side); self.preview = QLabel("Select a block to preview its first packaged texture."); self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumSize(250, 250); self.preview.setWordWrap(True)
         self.preview.setStyleSheet("background:#0b0f14;border:1px solid #303b48;border-radius:8px;")
-        sl.addWidget(self.preview, 1); self.notes = QPlainTextEdit(); self.notes.setReadOnly(True); self.notes.setMaximumHeight(150); sl.addWidget(self.notes); splitter.addWidget(side); splitter.setSizes([800, 320]); root.addWidget(splitter, 1)
+        sl.addWidget(self.preview, 1); self.notes = QPlainTextEdit(); self.notes.setReadOnly(True); self.notes.setMaximumHeight(150); sl.addWidget(self.notes); splitter.addWidget(side); splitter.setChildrenCollapsible(False); splitter.setSizes([800, 320]); root.addWidget(splitter, 1)
         bottom = QHBoxLayout(); self.export = QPushButton("Export catalog JSON…"); self.export.setEnabled(False); bottom.addStretch(); bottom.addWidget(self.export); root.addLayout(bottom)
         browse.clicked.connect(self._browse); analyze.clicked.connect(self._analyze); self.export.clicked.connect(self._export); self.table.itemSelectionChanged.connect(self._preview_selected)
 
@@ -330,7 +360,7 @@ class ModpackAnalyzerTab(AsyncTab):
         top.addWidget(browse_folder); top.addWidget(browse_zip); top.addWidget(run); root.addLayout(top)
         self.summary = _muted("No modpack analyzed yet."); root.addWidget(self.summary)
         self.table = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["Mod", "Mod IDs", "Version", "Loader", "Block candidates", "Source"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch); self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        _configure_resizable_columns(self.table, (210, 150, 110, 100, 150, 300))
         self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True); root.addWidget(self.table, 1)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(170); root.addWidget(self.log)
         bottom = QHBoxLayout(); self.export = QPushButton("Export combined analysis…"); self.export.setEnabled(False); bottom.addStretch(); bottom.addWidget(self.export); root.addLayout(bottom)
@@ -374,7 +404,7 @@ class CatalogTab(QWidget):
         top = QHBoxLayout(); self.path = QLineEdit(); self.path.setReadOnly(True); load = QPushButton("Load catalog…"); self.search = QLineEdit(); self.search.setPlaceholderText("Search registry, display name, mod or evidence…")
         top.addWidget(self.path, 1); top.addWidget(load); top.addWidget(self.search, 1); root.addLayout(top)
         self.table = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["Registry", "Display", "Mod", "Confidence", "Evidence", "Texture assets"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch); self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch); self.table.setSortingEnabled(True); root.addWidget(self.table, 1)
+        _configure_resizable_columns(self.table, (220, 220, 150, 110, 260, 120)); self.table.setSortingEnabled(True); root.addWidget(self.table, 1)
         load.clicked.connect(self._load); self.search.textChanged.connect(self._filter)
     def _load(self):
         p, _ = QFileDialog.getOpenFileName(self, "Load block catalog", str(Path.home()), "JSON (*.json);;All files (*)")

@@ -308,25 +308,56 @@ for workflow_name, workflow_text in [("development", dev), ("community release",
     if '$LASTEXITCODE -ne 0' in workflow_text:
         error(f"{workflow_name} workflow still performs a direct GUI executable LASTEXITCODE check")
 
-# Keep the Map Backporter form deterministic across Qt platform styles.
-# macOS QFormLayout defaults center fields and keep them at size-hint width,
-# which previously collapsed the conversion form in the packaged app.
+# Keep the packaged desktop UI deterministic across Qt platform styles.
+# The Backporter page must scroll instead of crushing its form when vertically
+# constrained, and analyzer headers must remain readable *and* user-resizable.
 main_window_path = root / "src/wgmap_backporter_studio/ui/main_window.py"
 main_window = main_window_path.read_text(encoding="utf-8") if main_window_path.exists() else ""
 for token in [
+    "QScrollArea",
     "QSizePolicy",
+    "scroll.setWidgetResizable(True)",
+    "scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)",
+    "scroll_body.setMinimumHeight(610)",
     "form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)",
     "form.setRowWrapPolicy(QFormLayout.DontWrapRows)",
     "form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)",
     "form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)",
     "form_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)",
+    "form_group.setMinimumHeight(195)",
+    "self.version.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)",
+    "self.version.setMinimumWidth(220)",
+    "self.version.setMaximumWidth(320)",
     "self.target_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)",
     "opts.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)",
+    "opts.setMinimumHeight(150)",
     "og.setColumnStretch(1, 1)",
-    "self.log.setMinimumHeight(160)",
+    "self.yoff.setMaximumWidth(180)",
+    "self.strip.setMaximumWidth(180)",
+    "self.log.setMinimumHeight(150)",
 ]:
     if token not in main_window:
         error(f"Map Backporter cross-platform layout invariant missing: {token}")
+
+for token in [
+    "def _configure_resizable_columns",
+    "header.setSectionResizeMode(QHeaderView.Interactive)",
+    "header.setMinimumSectionSize(76)",
+    "_configure_resizable_columns(self.table, (170, 180, 110, 210, 90, 90))",
+    "_configure_resizable_columns(self.table, (210, 150, 110, 100, 150, 300))",
+    "_configure_resizable_columns(self.table, (220, 220, 150, 110, 260, 120))",
+    "splitter.setChildrenCollapsible(False)",
+]:
+    if token not in main_window:
+        error(f"Analyzer table/header layout invariant missing: {token}")
+
+for forbidden in [
+    "setSectionResizeMode(0, QHeaderView.Stretch)",
+    "setSectionResizeMode(1, QHeaderView.Stretch)",
+    "setSectionResizeMode(5, QHeaderView.Stretch)",
+]:
+    if forbidden in main_window:
+        error(f"Analyzer table still locks a user-facing column to Stretch mode: {forbidden}")
 
 win_smoke_path = root / "packaging/windows/install_smoke_test.ps1"
 win_smoke = win_smoke_path.read_text(encoding="utf-8") if win_smoke_path.exists() else ""
