@@ -54,3 +54,17 @@ The Windows job verifies the frozen executable, builds the Inno Setup installer,
 ## Release artifact lifecycle
 
 Community release jobs use temporary Actions artifacts only to transfer the validated macOS and Windows packages into the publish job. They have a 3-day fallback retention. After `gh release create` succeeds and the files are attached to the GitHub Release, a cleanup job deletes the temporary `community-*` workflow artifacts from that run. If publication fails, the cleanup job does not run, preserving the staging artifacts for diagnosis/retry.
+
+## Packaged UI layout validation
+
+Before a public release, exercise the packaged application on macOS Apple Silicon and Windows x64 at the normal minimum window size and at larger/taller window sizes.
+
+For the **Map Backporter** page specifically, verify that:
+
+- the Conversion job form remains left/top aligned instead of adopting platform-specific centered form geometry;
+- Source map, Target version, Backend, Template world, and Output world rows retain normal control height and do not overlap;
+- path fields expand horizontally with the page while their browse buttons remain visible;
+- the Surface / compatibility options group retains normal row height;
+- the output/log panel receives the remaining vertical stretch without crushing the configuration groups.
+
+The source verifier enforces the explicit Qt form-growth, wrapping, alignment, size-policy, and log-minimum-height invariants that make this layout deterministic across platform styles.

@@ -12,7 +12,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMainWindow,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QSplitter,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSpinBox, QSplitter,
     QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 )
 
@@ -145,7 +145,19 @@ class BackportTab(AsyncTab):
             "Map Backporter",
             "Select the modern map, an older target/template world created with the exact destination modpack, and an empty output folder."
         ))
-        form_group = QGroupBox("Conversion job"); form = QFormLayout(form_group)
+        form_group = QGroupBox("Conversion job")
+        # QFormLayout defaults are platform-style dependent. On macOS the native
+        # defaults keep fields close to their size hints and center the form,
+        # which can make this page appear vertically/horizontally collapsed.
+        # Pin the layout policy so the same form geometry is used on every OS.
+        form_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        form = QFormLayout(form_group)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.DontWrapRows)
+        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
         self.source = QLineEdit(); self.source.setPlaceholderText("Modern world folder, region folder, region ZIP, or .mca")
         src_wrap = QWidget(self); src_l = QHBoxLayout(src_wrap); src_l.setContentsMargins(0, 0, 0, 0); src_l.addWidget(self.source, 1)
         src_file = QPushButton("File / ZIP…"); src_folder = QPushButton("Folder…")
@@ -160,14 +172,21 @@ class BackportTab(AsyncTab):
         self.version = QComboBox()
         for t in TARGETS: self.version.addItem(f"{t.version} — {t.status}", t)
         self.version.currentIndexChanged.connect(self._target_changed); form.addRow("Target version", self.version)
-        self.target_status = _muted(""); form.addRow("Backend", self.target_status)
+        self.target_status = _muted("")
+        self.target_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        form.addRow("Backend", self.target_status)
         self.template = QLineEdit(); self.template.setPlaceholderText("Saved target world opened once with the destination modpack")
         form.addRow("Template world", _path_row(self, "Select target/template world", "dir", self.template))
         self.output = QLineEdit(); self.output.setPlaceholderText("New or empty output world folder")
         form.addRow("Output world", _path_row(self, "Select empty output folder", "dir", self.output))
         root.addWidget(form_group)
 
-        opts = QGroupBox("Surface / compatibility options"); og = QGridLayout(opts)
+        opts = QGroupBox("Surface / compatibility options")
+        opts.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        og = QGridLayout(opts)
+        og.setColumnStretch(1, 1)
+        og.setHorizontalSpacing(12)
+        og.setVerticalSpacing(8)
         self.hbm = QCheckBox("Use safe HBM architectural replacements"); self.hbm.setChecked(True)
         self.hbm.setToolTip("Only architectural/decorative substitutes are selected; machines, ores and valuable resource blocks are intentionally excluded.")
         self.yoff = QSpinBox(); self.yoff.setRange(-192, 192); self.yoff.setSingleStep(16); self.yoff.setValue(0)
@@ -180,7 +199,7 @@ class BackportTab(AsyncTab):
         buttons = QHBoxLayout(); self.scan_btn = QPushButton("Scan source"); self.convert_btn = QPushButton("Convert map"); self.convert_btn.setObjectName("primary")
         buttons.addWidget(self.scan_btn); buttons.addStretch(); buttons.addWidget(self.convert_btn); root.addLayout(buttons)
         self.progress = QProgressBar(); self.progress.setRange(0, 1); self.progress.setValue(0); root.addWidget(self.progress)
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(220); root.addWidget(self.log, 1)
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(160); root.addWidget(self.log, 1)
         self.scan_btn.clicked.connect(self.scan_source); self.convert_btn.clicked.connect(self.convert); self._target_changed()
 
     def _target_changed(self):

@@ -308,6 +308,26 @@ for workflow_name, workflow_text in [("development", dev), ("community release",
     if '$LASTEXITCODE -ne 0' in workflow_text:
         error(f"{workflow_name} workflow still performs a direct GUI executable LASTEXITCODE check")
 
+# Keep the Map Backporter form deterministic across Qt platform styles.
+# macOS QFormLayout defaults center fields and keep them at size-hint width,
+# which previously collapsed the conversion form in the packaged app.
+main_window_path = root / "src/wgmap_backporter_studio/ui/main_window.py"
+main_window = main_window_path.read_text(encoding="utf-8") if main_window_path.exists() else ""
+for token in [
+    "QSizePolicy",
+    "form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)",
+    "form.setRowWrapPolicy(QFormLayout.DontWrapRows)",
+    "form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)",
+    "form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)",
+    "form_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)",
+    "self.target_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)",
+    "opts.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)",
+    "og.setColumnStretch(1, 1)",
+    "self.log.setMinimumHeight(160)",
+]:
+    if token not in main_window:
+        error(f"Map Backporter cross-platform layout invariant missing: {token}")
+
 win_smoke_path = root / "packaging/windows/install_smoke_test.ps1"
 win_smoke = win_smoke_path.read_text(encoding="utf-8") if win_smoke_path.exists() else ""
 for token in ["verify_packaged_exe.ps1", "unins*.exe", "Executable remained after uninstall"]:
