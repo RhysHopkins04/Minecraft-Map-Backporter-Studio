@@ -1,25 +1,42 @@
-# Validation status — v0.4.1 community repository package
+# Validation
 
-This package is the repository-ready community-distribution revision of WG Map Backporter Studio.
+The repository uses layered validation.
 
-## Source checks expected locally / in CI
+## Local/source validation
 
-- project-structure verification,
-- core smoke tests,
-- Python compile validation,
-- shell syntax validation for active macOS packaging scripts.
+Before committing a patch, run:
 
-## Release-platform validation
+```bash
+python3 scripts/verify_project.py
+python3 -m compileall -q launcher.py src tests scripts
+bash -n packaging/macos/*.sh
+```
 
-The public release workflow builds on native GitHub-hosted target runners:
+If the project dependencies are already installed, also run:
 
-- `macos-15` for Apple Silicon ARM64,
-- `windows-latest` for Windows x64.
+```bash
+python3 tests/test_smoke.py
+```
 
-The release gate does not claim operating-system publisher verification because community builds are unsigned.
+Repository Patch packages include their own validation wrapper so the exact expected patch state can be checked without requiring a packaged desktop build on the local machine.
 
-Instead, each final artifact must pass application/installer smoke tests and receive `release_status=community-validated` plus a SHA-256 checksum before the GitHub Release publish job can run.
+## GitHub CI
 
-## Important distinction
+`CI` runs for `main`, `dev`, and pull requests targeting either branch. It installs the core dependencies and runs the project verifier, smoke tests, Python compilation, and shell-script validation.
 
-`community-validated` means the packaged artifact passed this project's automated tests. It does **not** mean Apple notarized the application or Microsoft verified the publisher.
+## Development packaging
+
+Every push to `dev` builds temporary validated packages for:
+
+- macOS Apple Silicon
+- Windows x64
+
+The final development DMG/installer is exercised before being uploaded as a temporary GitHub Actions artifact. Development artifacts use the `dev-validated` manifest status and are retained for 14 days.
+
+## Community release validation
+
+A public Community Release is published only when both target-platform jobs succeed and both final manifests report `community-validated`.
+
+The macOS job verifies the ARM64 frozen application, creates the DMG, mounts that final DMG, and runs the packaged self-test from inside it.
+
+The Windows job verifies the frozen executable, builds the Inno Setup installer, installs that final installer, runs the installed self-test, uninstalls the application, and verifies removal.

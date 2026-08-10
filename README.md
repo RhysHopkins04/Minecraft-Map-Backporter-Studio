@@ -2,11 +2,12 @@
 
 > Cross-platform desktop tooling for backporting Minecraft Java worlds, analysing mod/modpack block assets, and building reusable source-to-target block mappings.
 
-[![CI](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/ci.yml/badge.svg)](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/ci.yml)
-[![Community Release](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/release-community.yml/badge.svg)](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/release-community.yml)
+[![CI](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/ci.yml)
+[![Dev Build](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/build-dev.yml/badge.svg?branch=dev)](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/build-dev.yml)
+[![Community Release](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/release-community.yml/badge.svg?branch=main)](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/release-community.yml)
 
-**Current version:** `0.4.1`  
-**Current conversion writer:** modern Java Anvil → Forge/Minecraft **1.7.10**  
+**Current version:** `0.4.1`
+**Current conversion writer:** modern Java Anvil → Forge/Minecraft **1.7.10**
 **Desktop targets:** macOS **Apple Silicon** and Windows **x64**
 
 WG Map Backporter Studio is being developed as a reusable Minecraft world-conversion and block-analysis application rather than a one-off conversion script.
@@ -113,9 +114,16 @@ GitHub Actions:
 7. uninstalls it and verifies removal,
 8. generates a SHA-256 checksum and validation manifest.
 
-The publishing job refuses to create the GitHub Release unless **both** platform manifests report `community-validated`.
+The publishing job refuses to create the GitHub Release unless **both** platform manifests report `community-validated`. Development builds use the separate `dev-validated` status and remain temporary GitHub Actions artifacts.
 
-## Development
+## Development and release channels
+
+The repository uses two long-lived branches:
+
+- `dev` is the active development/staging branch. Every push runs CI and produces temporary, validated macOS Apple Silicon and Windows x64 installer artifacts. Development artifacts are retained for 14 days and are **not** published as GitHub Releases.
+- `main` is the stable public-release branch. Changes should normally reach `main` through a pull request from `dev`. A Community Release is created only when the release version is intentionally advanced, or when the initial version is explicitly published through the workflow's manual control.
+
+A normal development cycle is therefore `feature/fix work → dev → validated development artifacts → dev-to-main release PR → main → validated Community Release`.
 
 The application is implemented in Python using PySide6/Qt and packaged with PyInstaller.
 
@@ -127,6 +135,7 @@ source .venv/bin/activate
 # .venv\Scripts\Activate.ps1
 
 python -m pip install -r requirements-build.txt
+python -m pip install -e .
 python scripts/verify_project.py
 python tests/test_smoke.py
 python -m wgmap_backporter_studio

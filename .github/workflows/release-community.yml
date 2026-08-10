@@ -1,0 +1,300 @@
+name: Community Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      publish_current_version:
+        description: "Publish the current version even if release/VERSION did not change (use for the initial release only)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: community-release-main
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      should_release: ${{ steps.release.outputs.should_release }}
+      reason: ${{ steps.release.outputs.reason }}
+    steps:
+      - name: Check out repository with history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install core dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Validate source before deciding whether to release
+        run: |
+          python scripts/verify_project.py
+          python tests/test_smoke.py
+          python -m compileall -q launcher.py src tests scripts
+          bash -n packaging/macos/*.sh
+
+      - id: release
+        name: Decide whether this main revision is a release
+        shell: bash
+        env:
+          MANUAL_PUBLISH: ${{ inputs.publish_current_version || false }}
+        run: |
+          set -euo pipefail
+          VERSION="$(cat release/VERSION)"
+          TAG="v${VERSION}"
+          SHOULD_RELEASE=false
+          REASON="No release version change detected."
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            REASON="${TAG} already exists; no duplicate release will be created."
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${MANUAL_PUBLISH}" == "true" ]]; then
+            SHOULD_RELEASE=true
+            REASON="Manual publication requested for ${TAG}."
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            PREVIOUS_VERSION="$(git show HEAD^:release/VERSION 2>/dev/null | tr -d '\r\n' || true)"
+            if [[ -n "${PREVIOUS_VERSION}" && "${PREVIOUS_VERSION}" != "${VERSION}" ]]; then
+              SHOULD_RELEASE=true
+              REASON="release/VERSION changed from ${PREVIOUS_VERSION} to ${VERSION}."
+            elif [[ -z "${PREVIOUS_VERSION}" ]]; then
+              REASON="release/VERSION was introduced by this revision; bootstrap commits do not auto-publish."
+            fi
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "should_release=${SHOULD_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
+          echo "Release decision: ${SHOULD_RELEASE} — ${REASON}"
+
+      - name: Explain skipped publication
+        if: steps.release.outputs.should_release != 'true'
+        run: echo "Community release skipped — ${{ steps.release.outputs.reason }}"
+
+  macos:
+    name: macOS Apple Silicon release package
+    if: needs.preflight.outputs.should_release == 'true'
+    needs: preflight
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Require Apple Silicon runner
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Validate source and packaging scripts
+        run: |
+          python scripts/verify_project.py
+          python tests/test_smoke.py
+          bash -n packaging/macos/create_dmg.sh packaging/macos/verify_community_dmg.sh
+
+      - name: Build native Apple Silicon application
+        run: python -m PyInstaller --clean --noconfirm WGMapBackporterStudio.spec
+
+      - name: Validate packaged application
+        run: |
+          BIN="dist/WG Map Backporter Studio.app/Contents/MacOS/WGMapBackporterStudio"
+          file "$BIN" | grep arm64
+          "$BIN" --self-test
+
+      - name: Create community DMG
+        shell: bash
+        run: |
+          VERSION="${{ needs.preflight.outputs.version }}"
+          mkdir -p release
+          packaging/macos/create_dmg.sh \
+            "dist/WG Map Backporter Studio.app" \
+            "release/WGMapBackporterStudio-${VERSION}-macOS-AppleSilicon.dmg"
+
+      - name: Validate final DMG
+        run: |
+          VERSION="${{ needs.preflight.outputs.version }}"
+          packaging/macos/verify_community_dmg.sh "release/WGMapBackporterStudio-${VERSION}-macOS-AppleSilicon.dmg"
+
+      - name: Create checksum and validation manifest
+        run: |
+          VERSION="${{ needs.preflight.outputs.version }}"
+          DMG="release/WGMapBackporterStudio-${VERSION}-macOS-AppleSilicon.dmg"
+          shasum -a 256 "$DMG" > "$DMG.sha256"
+          python scripts/make_release_manifest.py \
+            --version "$VERSION" \
+            --platform macOS \
+            --arch AppleSilicon \
+            --status community-validated \
+            --output "release/WGMapBackporterStudio-${VERSION}-macOS-AppleSilicon.verification.json" \
+            "$DMG"
+
+      - name: Upload validated macOS release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: community-macOS-AppleSilicon
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Windows x64 release package
+    if: needs.preflight.outputs.should_release == 'true'
+    needs: preflight
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Validate source
+        run: |
+          python scripts/verify_project.py
+          python tests/test_smoke.py
+
+      - name: Build native Windows x64 application
+        run: python -m PyInstaller --clean --noconfirm WGMapBackporterStudio.spec
+
+      - name: Run packaged application self-test
+        shell: pwsh
+        run: |
+          & ".\dist\WGMapBackporterStudio\WGMapBackporterStudio.exe" --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Packaged executable self-test failed" }
+
+      - name: Configure installer build
+        shell: pwsh
+        run: |
+          $version = "${{ needs.preflight.outputs.version }}"
+          $source = (Resolve-Path '.\dist\WGMapBackporterStudio').Path
+          $output = Join-Path $PWD 'release'
+          $basename = "WGMapBackporterStudio-$version-Windows-x64-Setup"
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+          "WGB_APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WGB_SOURCE_DIR=$source" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WGB_OUTPUT_DIR=$output" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WGB_OUTPUT_BASENAME=$basename" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WGB_INSTALLER_PATH=$output\$basename.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Compile community installer
+        shell: cmd
+        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "packaging\windows\WGMapBackporterStudio.iss"'
+
+      - name: Install, self-test, and uninstall final installer
+        shell: pwsh
+        run: .\packaging\windows\install_smoke_test.ps1 -Installer "$env:WGB_INSTALLER_PATH"
+
+      - name: Create checksum and validation manifest
+        shell: pwsh
+        run: |
+          $version = "${{ needs.preflight.outputs.version }}"
+          $installer = $env:WGB_INSTALLER_PATH
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          "$hash  $([System.IO.Path]::GetFileName($installer))" | Set-Content "$installer.sha256"
+          python scripts/make_release_manifest.py --version $version --platform Windows --arch x64 --status community-validated --output ".\release\WGMapBackporterStudio-$version-Windows-x64.verification.json" $installer
+
+      - name: Upload validated Windows release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: community-Windows-x64
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish validated GitHub Release
+    if: needs.preflight.outputs.should_release == 'true'
+    needs:
+      - preflight
+      - macos
+      - windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download validated release packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: community-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Require both validated community artifacts
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+
+          manifests = list(pathlib.Path('release-assets').glob('*.verification.json'))
+          if len(manifests) != 2:
+              raise SystemExit(f'Expected exactly 2 validation manifests, found {len(manifests)}')
+
+          seen = set()
+          for path in manifests:
+              data = json.loads(path.read_text(encoding='utf-8'))
+              if data.get('release_status') != 'community-validated':
+                  raise SystemExit(f'{path} is not community-validated')
+              seen.add((data.get('platform'), data.get('architecture')))
+
+          required = {('macOS', 'AppleSilicon'), ('Windows', 'x64')}
+          if seen != required:
+              raise SystemExit(f'Unexpected platform set: {seen!r}')
+
+          print('Both supported community release artifacts validated.')
+          PY
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          VERSION="${{ needs.preflight.outputs.version }}"
+          cat > release-notes.md <<EOF2
+          ## WG Map Backporter Studio ${VERSION} — Community Build
+
+          Supported downloads:
+          - macOS Apple Silicon DMG
+          - Windows x64 Setup EXE
+
+          These community builds are **unsigned**. They have passed packaged application and installer smoke tests in GitHub Actions, but macOS/Windows may show first-run trust warnings because no paid publisher certificate is attached.
+
+          Verify the SHA-256 file beside your download before authorising an unsigned build.
+
+          See `docs/INSTALLATION.md` in the repository for the supported first-launch process. Do not disable Gatekeeper or SmartScreen globally.
+          EOF2
+
+      - name: Publish GitHub Release and create version tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="${{ needs.preflight.outputs.version }}"
+          TAG="v${VERSION}"
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "WG Map Backporter Studio ${TAG}" \
+            --notes-file release-notes.md \
+            release-assets/*

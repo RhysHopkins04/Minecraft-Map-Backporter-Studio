@@ -1,10 +1,12 @@
 # GitHub Repository Setup
 
-## Recommended repository
+## Repository
 
-**Owner:** `RhysHopkins04`  
-**Repository name:** `Minecraft-Map-Backporter-Studio`  
+**Owner:** `RhysHopkins04`
+**Repository:** `Minecraft-Map-Backporter-Studio`
 **Visibility:** Public
+**Default/stable branch:** `main`
+**Development branch:** `dev`
 
 **Description:**
 
@@ -14,23 +16,25 @@ Suggested topics:
 
 `minecraft`, `minecraft-java`, `map-converter`, `world-converter`, `anvil`, `nbt`, `forge`, `modding`, `pyside6`, `minecraft-tools`
 
-## When creating the repository on GitHub
+## Repository Patch 001 bootstrap
 
-Create the repository **empty**:
+The initial GitHub import accidentally omitted the contents of `.github/`, `src/`, `scripts/`, `tests/`, `packaging/`, `resources/`, and `docs/`.
 
-- do not add GitHub's generated README,
-- do not add a GitHub-generated `.gitignore`,
-- do not choose another licence from the GitHub licence picker.
+Repository Patch 001 restores those files and establishes the two-branch CI/release model. Apply and validate that patch on `main` before creating the permanent `dev` branch.
 
-This project already includes all three and uses a source-available licensing model that is intentionally different from MIT/GPL/Apache.
+## Branch model
 
-After the files are pushed, enable GitHub Actions. If available, also enable **Private vulnerability reporting** under the repository Security settings.
+- `dev`: normal active development; CI plus temporary validated development installers.
+- `main`: stable source and public Community Releases.
+
+Development artifacts are uploaded to GitHub Actions rather than cluttering the public Releases page. A normal release is promoted through a `dev → main` pull request.
 
 ## First release
 
-Once the initial repository is pushed and CI is green, create/tag `v0.4.1`. The `release-community.yml` workflow is designed to build and publish exactly two validated community artifacts:
+Do not tag `v0.4.1` before the development packaging workflow has successfully produced both target-platform artifacts.
 
-- macOS Apple Silicon DMG
-- Windows x64 Setup EXE
+Repository Patch 001 introduces `release/VERSION` without automatically publishing it. After the `dev` branch pipeline is proven, the initial version can be published manually from the **Community Release** workflow using its `publish_current_version` input.
 
-No Apple Developer or Windows code-signing secrets are required for the community workflow.
+Subsequent releases are version-gated: advancing `release/VERSION` as part of a release PR and merging that PR to `main` triggers the full validated Community Release pipeline automatically.
+
+See [`docs/GITHUB_SETTINGS.md`](docs/GITHUB_SETTINGS.md) for the complete repository settings, Actions permissions, security settings, and branch/tag rulesets.

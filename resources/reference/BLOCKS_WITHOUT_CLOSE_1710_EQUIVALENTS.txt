@@ -1,0 +1,116 @@
+Blocks/families in the supplied modern map that do NOT have a genuinely close
+Minecraft 1.7.10 equivalent
+===============================================================
+
+This list is based on the actual block palettes found in the supplied region data.
+It groups related blocks instead of repeating every colour/state variant.
+
+OMITTED OR FUNDAMENTALLY UNREPRESENTABLE
+----------------------------------------
+- barrier
+- structure_block
+- jigsaw
+- modern invisible light blocks
+- wall banners / banners (all colours)
+- sculk_vein
+- modern underwater vegetation where keeping water is less damaging than inserting
+  a solid legacy block (kelp, seagrass, sea pickles)
+
+VERY POOR / VISUAL APPROXIMATION ONLY
+-------------------------------------
+- amethyst_block, budding_amethyst, amethyst buds/clusters
+- sculk, sculk catalyst/sensor/calibrated sensor/shrieker
+- prismarine, prismarine bricks, dark prismarine and their stair/wall variants
+- purpur block/stairs
+- modern copper families: exposed/weathered/oxidized/waxed/cut copper and slabs/stairs
+- ancient_debris and netherite_block
+- coral blocks/fans/wall fans (live and dead variants)
+- froglights
+- honey block / honeycomb block
+- bee nest / beehive
+- decorated pot
+- bells
+- campfires / soul campfires
+- candles (all colours)
+- lightning rod
+- conduit
+- respawn anchor
+- lodestone
+- target block
+- observer
+- glazed terracotta patterns (colour can be preserved, pattern cannot)
+- modern shulker boxes (converted to an empty chest-like shell)
+
+MODERN WOOD FAMILIES WITH NO TRUE 1.7.10 SET
+--------------------------------------------
+- mangrove wood family
+- cherry wood family
+- bamboo wood family
+- crimson wood/hyphae family
+- warped wood/hyphae family
+- stripped logs/wood (legacy logs can preserve axis but not the stripped texture)
+
+The converter preserves shape where practical using old stairs/slabs/doors/etc. and
+chooses a roughly similar legacy/HBM material. Exact modern texture parity is not
+possible without adding a dedicated compatibility/resource mod.
+
+MODERN PLANTS / CAVE VEGETATION
+-------------------------------
+- azalea / flowering azalea
+- azalea leaves variants
+- big and small dripleaf
+- cave vines
+- glow lichen
+- hanging roots
+- moss block / moss carpet
+- spore blossom
+- pink petals
+- sweet berry bush
+- torchflower
+- nether sprouts / crimson roots / warped roots / twisting vines
+
+These are mapped to old saplings, leaves, vines, tall grass, carpet, or flowers.
+
+MODERN WORKSTATIONS / FUNCTIONAL BLOCKS
+---------------------------------------
+- barrel
+- blast furnace
+- smoker
+- cartography table
+- smithing table
+- loom
+- stonecutter
+- lectern
+- composter
+- grindstone
+
+They are converted to visually plausible 1.7.10 shells (chest/furnace/crafting table)
+but do not keep modern functionality.
+
+NEW STONE FAMILIES THAT ARE CLOSE BUT NOT EXACT
+-----------------------------------------------
+These are comparatively safe because HBM has useful architectural substitutes:
+- deepslate -> HBM basalt
+- polished deepslate -> HBM polished basalt
+- deepslate bricks -> HBM basalt brick
+- deepslate tiles -> HBM basalt tiles
+- blackstone families -> HBM basalt families
+- andesite/tuff -> HBM gneiss-style stone
+- granite -> legacy coloured-clay approximation
+- diorite/calcite -> quartz approximation
+- dripstone -> brown structural-material approximation
+- mud -> HBM mud block
+
+OTHER CONTENT LOSS TO EXPECT
+----------------------------
+Even when the block itself has a reasonable 1.7.10 equivalent, the current tool does
+not translate modern block-entity data. Therefore these lose data/state beyond basic
+block orientation:
+- sign text
+- chest/barrel/container contents
+- banner patterns
+- player-head skins/profiles
+- command block commands
+- decorated-pot data
+
+This is deliberate for the first terrain/architecture backport pass.

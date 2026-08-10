@@ -1,0 +1,185 @@
+name: Development builds
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: development-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: Development preflight
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install core dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Validate source
+        run: |
+          python scripts/verify_project.py
+          python tests/test_smoke.py
+          python -m compileall -q launcher.py src tests scripts
+          bash -n packaging/macos/*.sh
+
+      - id: version
+        name: Resolve build identity
+        shell: bash
+        run: |
+          VERSION="$(cat release/VERSION)"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "Development build: ${VERSION}-dev.${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
+
+  macos:
+    name: macOS Apple Silicon development package
+    needs: preflight
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Require Apple Silicon runner
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Validate source
+        run: |
+          python scripts/verify_project.py
+          python tests/test_smoke.py
+          bash -n packaging/macos/create_dmg.sh packaging/macos/verify_community_dmg.sh
+
+      - name: Build native Apple Silicon application
+        run: python -m PyInstaller --clean --noconfirm WGMapBackporterStudio.spec
+
+      - name: Validate packaged application
+        run: |
+          BIN="dist/WG Map Backporter Studio.app/Contents/MacOS/WGMapBackporterStudio"
+          file "$BIN" | grep arm64
+          "$BIN" --self-test
+
+      - name: Create and validate development DMG
+        shell: bash
+        run: |
+          VERSION="${{ needs.preflight.outputs.version }}"
+          BUILD_ID="dev.${GITHUB_RUN_NUMBER}-${{ needs.preflight.outputs.short_sha }}"
+          mkdir -p release
+          DMG="release/WGMapBackporterStudio-${VERSION}-${BUILD_ID}-macOS-AppleSilicon.dmg"
+          packaging/macos/create_dmg.sh "dist/WG Map Backporter Studio.app" "$DMG" "WG Map Backporter Studio DEV"
+          packaging/macos/verify_community_dmg.sh "$DMG"
+          shasum -a 256 "$DMG" > "$DMG.sha256"
+          python scripts/make_release_manifest.py \
+            --version "$VERSION" \
+            --platform macOS \
+            --arch AppleSilicon \
+            --status dev-validated \
+            --output "release/WGMapBackporterStudio-${VERSION}-${BUILD_ID}-macOS-AppleSilicon.verification.json" \
+            "$DMG"
+
+      - name: Upload macOS development package
+        uses: actions/upload-artifact@v4
+        with:
+          name: DEV-${{ github.run_number }}-${{ needs.preflight.outputs.short_sha }}-macOS-AppleSilicon
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows x64 development package
+    needs: preflight
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Validate source
+        run: |
+          python scripts/verify_project.py
+          python tests/test_smoke.py
+
+      - name: Build native Windows x64 application
+        run: python -m PyInstaller --clean --noconfirm WGMapBackporterStudio.spec
+
+      - name: Run packaged application self-test
+        shell: pwsh
+        run: |
+          & ".\dist\WGMapBackporterStudio\WGMapBackporterStudio.exe" --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Packaged executable self-test failed" }
+
+      - name: Configure development installer
+        shell: pwsh
+        run: |
+          $version = "${{ needs.preflight.outputs.version }}"
+          $buildId = "dev.${{ github.run_number }}-${{ needs.preflight.outputs.short_sha }}"
+          $source = (Resolve-Path '.\dist\WGMapBackporterStudio').Path
+          $output = Join-Path $PWD 'release'
+          $basename = "WGMapBackporterStudio-$version-$buildId-Windows-x64-Setup"
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+          "WGB_APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WGB_SOURCE_DIR=$source" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WGB_OUTPUT_DIR=$output" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WGB_OUTPUT_BASENAME=$basename" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WGB_INSTALLER_PATH=$output\$basename.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WGB_BUILD_ID=$buildId" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Compile development installer
+        shell: cmd
+        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "packaging\windows\WGMapBackporterStudio.iss"'
+
+      - name: Install, self-test, and uninstall development installer
+        shell: pwsh
+        run: .\packaging\windows\install_smoke_test.ps1 -Installer "$env:WGB_INSTALLER_PATH"
+
+      - name: Create checksum and validation manifest
+        shell: pwsh
+        run: |
+          $version = "${{ needs.preflight.outputs.version }}"
+          $installer = $env:WGB_INSTALLER_PATH
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          "$hash  $([System.IO.Path]::GetFileName($installer))" | Set-Content "$installer.sha256"
+          python scripts/make_release_manifest.py --version $version --platform Windows --arch x64 --status dev-validated --output ".\release\WGMapBackporterStudio-$version-$env:WGB_BUILD_ID-Windows-x64.verification.json" $installer
+
+      - name: Upload Windows development package
+        uses: actions/upload-artifact@v4
+        with:
+          name: DEV-${{ github.run_number }}-${{ needs.preflight.outputs.short_sha }}-Windows-x64
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
