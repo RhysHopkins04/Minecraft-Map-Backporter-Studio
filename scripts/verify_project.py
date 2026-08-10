@@ -191,6 +191,26 @@ for token in [
     if token not in dev:
         error(f"development build workflow missing: {token}")
 
+
+# Routine dependency version updates should flow through dev without creating
+# unnecessary pip lower-bound churn. Security updates remain repository-managed
+# and target the default branch independently of this version-update policy.
+dependabot_path = root / ".github/dependabot.yml"
+dependabot = dependabot_path.read_text(encoding="utf-8") if dependabot_path.exists() else ""
+if re.search(r'package-ecosystem:\s*["\']?pip["\']?', dependabot):
+    error("Dependabot routine pip version updates must remain disabled; security updates are managed separately")
+if len(re.findall(r'package-ecosystem:\s*["\']?github-actions["\']?', dependabot)) != 1:
+    error("Dependabot must contain exactly one github-actions version-update entry")
+for token in [
+    'target-branch: "dev"',
+    'interval: "weekly"',
+    'open-pull-requests-limit: 2',
+    'github-actions:',
+    '- "*"',
+]:
+    if token not in dependabot:
+        error(f"Dependabot GitHub Actions policy missing: {token}")
+
 manifest_path = root / "scripts/make_release_manifest.py"
 manifest = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else ""
 for token in ['"community-validated"', '"dev-validated"']:
