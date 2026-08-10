@@ -14,8 +14,7 @@ if ($p.ExitCode -ne 0) { throw "Installer failed with exit code $($p.ExitCode)" 
 $exe = Join-Path $target "WGMapBackporterStudio.exe"
 if (-not (Test-Path $exe)) { throw "Installed executable missing: $exe" }
 
-$selfTest = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru
-if ($selfTest.ExitCode -ne 0) { throw "Installed executable self-test failed with exit code $($selfTest.ExitCode)" }
+& "$PSScriptRoot\verify_packaged_exe.ps1" -Executable $exe
 
 $uninstaller = Get-ChildItem $target -Filter 'unins*.exe' -ErrorAction Stop | Select-Object -First 1
 if (-not $uninstaller) { throw "Inno Setup uninstaller was not installed" }
