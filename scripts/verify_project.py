@@ -156,7 +156,8 @@ if "release/*" not in gitignore or "!release/VERSION" not in gitignore:
 if re.search(r"(?m)^release/$", gitignore):
     error(".gitignore must not ignore the entire release directory because release/VERSION is tracked")
 
-# GitHub-hosted runners use Node 24 for JavaScript actions. Keep workflow action majors current.
+# Keep GitHub-maintained action majors within supported floors while allowing
+# Dependabot to advance them coherently instead of hard-coding one exact major.
 workflow_texts = {
     "ci.yml": ci,
     "release-community.yml": workflow,
@@ -165,10 +166,34 @@ workflow_texts = {
 dev_path = root / ".github/workflows/build-dev.yml"
 dev = dev_path.read_text(encoding="utf-8") if dev_path.exists() else ""
 workflow_texts["build-dev.yml"] = dev
+
+
+def action_majors(workflow_text: str, action_name: str) -> set[int]:
+    return {int(value) for value in re.findall(rf"{re.escape(action_name)}@v(\d+)", workflow_text)}
+
+
+for action_name, allowed_majors in [
+    ("actions/checkout", {6, 7}),
+    ("actions/setup-python", {6, 7}),
+]:
+    observed_by_workflow: dict[str, set[int]] = {}
+    for workflow_name, workflow_text in workflow_texts.items():
+        majors = action_majors(workflow_text, action_name)
+        observed_by_workflow[workflow_name] = majors
+        if not majors:
+            error(f"{workflow_name} missing GitHub action: {action_name}@vN")
+        elif not majors.issubset(allowed_majors):
+            error(
+                f"{workflow_name} references unreviewed {action_name} major(s): "
+                f"{sorted(majors)}; allowed majors are {sorted(allowed_majors)}"
+            )
+        elif len(majors) != 1:
+            error(f"{workflow_name} mixes {action_name} majors: {sorted(majors)}")
+    populated = [next(iter(majors)) for majors in observed_by_workflow.values() if len(majors) == 1]
+    if populated and len(set(populated)) != 1:
+        error(f"workflows must use one consistent {action_name} major, found {sorted(set(populated))}")
+
 for workflow_name, workflow_text in workflow_texts.items():
-    for required_action in ["actions/checkout@v6", "actions/setup-python@v6"]:
-        if required_action not in workflow_text:
-            error(f"{workflow_name} missing current GitHub action: {required_action}")
     for deprecated_action in [
         "actions/checkout@v4",
         "actions/setup-python@v5",
@@ -178,18 +203,51 @@ for workflow_name, workflow_text in workflow_texts.items():
         if deprecated_action in workflow_text:
             error(f"{workflow_name} still references deprecated Node-20-era action: {deprecated_action}")
 
+for workflow_name, workflow_text in [("build-dev.yml", dev), ("release-community.yml", workflow)]:
+    upload_majors = action_majors(workflow_text, "actions/upload-artifact")
+    if not upload_majors or min(upload_majors) < 7:
+        error(f"{workflow_name} must use actions/upload-artifact@v7 or newer")
+
+download_majors = action_majors(workflow, "actions/download-artifact")
+if not download_majors or min(download_majors) < 8:
+    error("release-community.yml must use actions/download-artifact@v8 or newer")
+
 for token in [
-    "actions/upload-artifact@v7",
     "- dev",
     "Development builds",
-    "retention-days: 14",
+    "paths:",
+    '".github/workflows/build-dev.yml"',
+    '"src/**"',
+    '"packaging/**"',
+    '"resources/**"',
+    "retention-days: 7",
+    "Retain newest development artifact pair",
+    "actions: write",
+    'startswith("DEV-")',
+    "gh api --method DELETE",
     "dev-validated",
     "create_dmg.sh",
     "install_smoke_test.ps1",
     "WGB_OUTPUT_BASENAME",
 ]:
     if token not in dev:
-        error(f"development build workflow missing: {token}")
+        error(f"development build workflow missing artifact-lifecycle invariant: {token}")
+if "retention-days: 14" in dev:
+    error("development artifacts must not retain the old 14-day stacking policy")
+
+for token in [
+    "permissions:\n  contents: read",
+    "permissions:\n      contents: write",
+    "retention-days: 3",
+    "Remove temporary release workflow artifacts",
+    "actions: write",
+    'startswith("community-")',
+    "needs.publish.result == 'success'",
+    "gh api --method DELETE",
+    "GitHub Release assets remain published",
+]:
+    if token not in workflow:
+        error(f"community release workflow missing artifact-lifecycle invariant: {token}")
 
 
 # Routine dependency version updates should flow through dev without creating

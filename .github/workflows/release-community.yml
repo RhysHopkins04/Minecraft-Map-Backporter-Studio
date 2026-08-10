@@ -13,7 +13,7 @@ on:
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: community-release-main
@@ -152,7 +152,7 @@ jobs:
           name: community-macOS-AppleSilicon
           path: release/*
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 3
 
   windows:
     name: Windows x64 release package
@@ -224,7 +224,7 @@ jobs:
           name: community-Windows-x64
           path: release/*
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 3
 
   publish:
     name: Publish validated GitHub Release
@@ -234,6 +234,8 @@ jobs:
       - macos
       - windows
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download validated release packages
         uses: actions/download-artifact@v8
@@ -296,3 +298,42 @@ jobs:
             --title "WG Map Backporter Studio ${TAG}" \
             --notes-file release-notes.md \
             release-assets/*
+
+  cleanup:
+    name: Remove temporary release workflow artifacts
+    if: ${{ always() && needs.publish.result == 'success' }}
+    needs:
+      - publish
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Delete temporary community artifacts after publication
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Release publication succeeded; removing temporary community-* artifacts from workflow run ${GITHUB_RUN_ID}."
+          deleted=0
+          artifact_list="$(mktemp)"
+          trap 'rm -f "$artifact_list"' EXIT
+          if ! gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired == false) | select(.workflow_run != null) | select(.name | startswith("community-")) | [.id, .workflow_run.id, .name] | @tsv' \
+            > "$artifact_list"; then
+            echo "::warning::Could not list release workflow artifacts for cleanup. Retention policy remains the fallback."
+            exit 0
+          fi
+          while IFS=$'\t' read -r artifact_id artifact_run_id artifact_name; do
+            [[ -z "${artifact_id:-}" ]] && continue
+            [[ "$artifact_run_id" != "$GITHUB_RUN_ID" ]] && continue
+            echo "Deleting temporary release artifact: $artifact_name (id=$artifact_id)"
+            if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"; then
+              deleted=$((deleted + 1))
+            else
+              echo "::warning::Could not delete temporary release artifact $artifact_name (id=$artifact_id). It will expire by retention policy."
+            fi
+          done < "$artifact_list"
+          echo "Deleted ${deleted} temporary release artifact(s). GitHub Release assets remain published."
