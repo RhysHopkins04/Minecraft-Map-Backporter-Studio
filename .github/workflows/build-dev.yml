@@ -22,10 +22,10 @@ jobs:
       short_sha: ${{ steps.version.outputs.short_sha }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -55,10 +55,10 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -102,7 +102,7 @@ jobs:
             "$DMG"
 
       - name: Upload macOS development package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: DEV-${{ github.run_number }}-${{ needs.preflight.outputs.short_sha }}-macOS-AppleSilicon
           path: release/*
@@ -115,10 +115,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -177,7 +177,7 @@ jobs:
           python scripts/make_release_manifest.py --version $version --platform Windows --arch x64 --status dev-validated --output ".\release\WGMapBackporterStudio-$version-$env:WGB_BUILD_ID-Windows-x64.verification.json" $installer
 
       - name: Upload Windows development package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: DEV-${{ github.run_number }}-${{ needs.preflight.outputs.short_sha }}-Windows-x64
           path: release/*

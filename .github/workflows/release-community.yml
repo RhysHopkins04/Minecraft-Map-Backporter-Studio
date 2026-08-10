@@ -29,12 +29,12 @@ jobs:
       reason: ${{ steps.release.outputs.reason }}
     steps:
       - name: Check out repository with history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -91,10 +91,10 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -147,7 +147,7 @@ jobs:
             "$DMG"
 
       - name: Upload validated macOS release package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: community-macOS-AppleSilicon
           path: release/*
@@ -161,10 +161,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -221,7 +221,7 @@ jobs:
           python scripts/make_release_manifest.py --version $version --platform Windows --arch x64 --status community-validated --output ".\release\WGMapBackporterStudio-$version-Windows-x64.verification.json" $installer
 
       - name: Upload validated Windows release package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: community-Windows-x64
           path: release/*
@@ -238,7 +238,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download validated release packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: community-*
           path: release-assets

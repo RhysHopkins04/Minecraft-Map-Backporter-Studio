@@ -117,6 +117,8 @@ for token in ["- main", "- dev", "name: Repository validation", "permissions:", 
 workflow_path = root / ".github/workflows/release-community.yml"
 workflow = workflow_path.read_text(encoding="utf-8") if workflow_path.exists() else ""
 required_release_tokens = [
+    "actions/upload-artifact@v7",
+    "actions/download-artifact@v8",
     "branches:",
     "- main",
     "publish_current_version",
@@ -145,9 +147,38 @@ for forbidden in [
     if forbidden in workflow:
         error(f"community release workflow unexpectedly requires signed-release feature: {forbidden}")
 
+# Keep release/VERSION tracked while generated release artifacts remain ignored.
+gitignore_path = root / ".gitignore"
+gitignore = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+if "release/*" not in gitignore or "!release/VERSION" not in gitignore:
+    error(".gitignore must ignore generated release artifacts while explicitly tracking release/VERSION")
+if re.search(r"(?m)^release/$", gitignore):
+    error(".gitignore must not ignore the entire release directory because release/VERSION is tracked")
+
+# GitHub-hosted runners use Node 24 for JavaScript actions. Keep workflow action majors current.
+workflow_texts = {
+    "ci.yml": ci,
+    "release-community.yml": workflow,
+}
+
 dev_path = root / ".github/workflows/build-dev.yml"
 dev = dev_path.read_text(encoding="utf-8") if dev_path.exists() else ""
+workflow_texts["build-dev.yml"] = dev
+for workflow_name, workflow_text in workflow_texts.items():
+    for required_action in ["actions/checkout@v6", "actions/setup-python@v6"]:
+        if required_action not in workflow_text:
+            error(f"{workflow_name} missing current GitHub action: {required_action}")
+    for deprecated_action in [
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "actions/upload-artifact@v4",
+        "actions/download-artifact@v4",
+    ]:
+        if deprecated_action in workflow_text:
+            error(f"{workflow_name} still references deprecated Node-20-era action: {deprecated_action}")
+
 for token in [
+    "actions/upload-artifact@v7",
     "- dev",
     "Development builds",
     "retention-days: 14",

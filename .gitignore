@@ -18,7 +18,8 @@ ENV/
 # Packaging / build outputs
 build/
 dist/
-release/
+release/*
+!release/VERSION
 *.egg-info/
 .eggs/
 *.whl
