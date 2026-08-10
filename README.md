@@ -1,0 +1,167 @@
+# WG Map Backporter Studio
+
+> Cross-platform desktop tooling for backporting Minecraft Java worlds, analysing mod/modpack block assets, and building reusable source-to-target block mappings.
+
+[![CI](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/ci.yml/badge.svg)](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/ci.yml)
+[![Community Release](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/release-community.yml/badge.svg)](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/release-community.yml)
+
+**Current version:** `0.4.1`  
+**Current conversion writer:** modern Java Anvil → Forge/Minecraft **1.7.10**  
+**Desktop targets:** macOS **Apple Silicon** and Windows **x64**
+
+WG Map Backporter Studio is being developed as a reusable Minecraft world-conversion and block-analysis application rather than a one-off conversion script.
+
+## What it does
+
+### Map Backporter
+
+The current working backend converts modern palette-based Minecraft Java Anvil chunks into legacy Forge/Minecraft 1.7.10 chunk storage.
+
+It can:
+
+- read a world folder, `region` folder, ZIP, or individual `.mca` file,
+- clone a real 1.7.10 Forge target/template world,
+- resolve the target world's persisted Forge/FML registry instead of hard-coding mod numeric IDs,
+- write legacy `Blocks`, `Data`, and `Add` arrays,
+- preserve and translate surface structures while reporting unavoidable height loss,
+- apply conservative HBM architectural substitutions,
+- leave source/template inputs untouched,
+- generate conversion reports for approximate, unsupported, and cropped blocks.
+
+The original large validation map used during development contains 34 populated regions and 27,761 populated chunks and uses a modern palette-based chunk format.
+
+### Mod / JAR Analyzer
+
+The application can inspect mod JARs for block-related information such as:
+
+- mod metadata,
+- asset namespaces,
+- blockstate/model JSON,
+- block textures,
+- language/display-name hints,
+- likely registry-name hints,
+- texture previews.
+
+Asset-derived results are treated as evidence rather than proof. Legacy mods and custom renderers can register blocks in ways that cannot be reconstructed perfectly from packaged resources alone.
+
+### Modpack Analyzer
+
+Local instances, ZIPs, and CurseForge-style exports can be scanned to build a combined target-block catalog. JARs physically present in the pack can be analysed directly; manifest-only entries remain unresolved until their actual files are available.
+
+### Catalog Workspace
+
+Generated catalogs provide the basis for future reusable mapping profiles and visual source→target suggestions.
+
+## Target versions
+
+The architecture is intended to support multiple target eras, including 1.7.10 through 1.16.5, but **1.7.10 is currently the only conversion writer considered implemented**.
+
+Unsupported target selectors must refuse conversion rather than silently produce a world that only appears valid.
+
+Planned future work includes:
+
+- visual block-mapping workspace,
+- texture/material/geometry similarity scoring,
+- reusable mapping profiles,
+- richer Forge/Fabric/NeoForge mod analysis,
+- CurseForge/Modrinth dependency resolution,
+- validated 1.12.2 and 1.16.5 writers,
+- safer tile-entity/entity conversion,
+- more complete surface-only extraction modes.
+
+## Downloads
+
+End users should use the files published on the repository's **Releases** page rather than cloning the source.
+
+Community releases provide:
+
+- `WGMapBackporterStudio-<version>-macOS-AppleSilicon.dmg`
+- `WGMapBackporterStudio-<version>-Windows-x64-Setup.exe`
+- SHA-256 checksum files for both packages
+
+These community builds are intentionally **unsigned**. They are built and smoke-tested on the target operating system, but they are not Apple-notarized and do not carry a paid Windows publisher certificate.
+
+See [`docs/INSTALLATION.md`](docs/INSTALLATION.md) for the first-launch process.
+
+## Community-build verification
+
+A successful release workflow must independently validate both supported platforms.
+
+### macOS Apple Silicon
+
+GitHub Actions:
+
+1. runs source checks,
+2. builds the native ARM64 `.app`,
+3. confirms the packaged executable is ARM64,
+4. runs the frozen application's `--self-test`,
+5. creates a drag-to-Applications DMG,
+6. mounts the final DMG,
+7. runs the self-test from the application inside that DMG,
+8. generates a SHA-256 checksum and validation manifest.
+
+### Windows x64
+
+GitHub Actions:
+
+1. runs source checks,
+2. builds the native x64 application,
+3. runs the packaged `--self-test`,
+4. compiles the Inno Setup installer,
+5. installs the final Setup EXE silently on the CI machine,
+6. runs the installed application's `--self-test`,
+7. uninstalls it and verifies removal,
+8. generates a SHA-256 checksum and validation manifest.
+
+The publishing job refuses to create the GitHub Release unless **both** platform manifests report `community-validated`.
+
+## Development
+
+The application is implemented in Python using PySide6/Qt and packaged with PyInstaller.
+
+```bash
+python -m venv .venv
+# macOS/Linux
+source .venv/bin/activate
+# Windows PowerShell
+# .venv\Scripts\Activate.ps1
+
+python -m pip install -r requirements-build.txt
+python scripts/verify_project.py
+python tests/test_smoke.py
+python -m wgmap_backporter_studio
+```
+
+A local PyInstaller build can be produced with:
+
+```bash
+python -m PyInstaller --clean --noconfirm WGMapBackporterStudio.spec
+```
+
+PyInstaller is not a cross-compiler; official community release jobs build on the operating system they target.
+
+## Repository safety
+
+Do not commit real Minecraft worlds, region files, mod JARs, exported modpacks, signing keys, certificates, or other large/private test inputs. The repository `.gitignore` intentionally blocks the common forms of these files.
+
+## Licensing
+
+This project is **source-available, not open source**.
+
+Original project code is made available under the **PolyForm Strict License 1.0.0**. In broad terms, the licence permits qualifying non-commercial use but does not grant permission to distribute the software or make modified/derivative versions.
+
+Read [`LICENSE.md`](LICENSE.md) and [`docs/LICENSING.md`](docs/LICENSING.md) before using the source.
+
+Third-party dependencies retain their own licences; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+## Contributing
+
+Bug reports, compatibility information, and feature suggestions are welcome. Code pull requests are not accepted by default while the project's contribution/licensing model is being established. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## Security
+
+Please do not post exploitable archive/parser issues publicly. See [`SECURITY.md`](SECURITY.md).
+
+## Disclaimer
+
+Minecraft is a trademark of Microsoft Corporation. WG Map Backporter Studio is not affiliated with, endorsed by, sponsored by, or approved by Mojang Studios or Microsoft Corporation. Third-party Minecraft mods and their assets remain the property of their respective owners.
