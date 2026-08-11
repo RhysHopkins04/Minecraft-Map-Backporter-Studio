@@ -13,6 +13,7 @@ from wgmap_backporter_studio.core.jar_analyzer import analyze_jar
 from wgmap_backporter_studio.core.modpack_analyzer import analyze_modpack
 from wgmap_backporter_studio.core.version_targets import TARGET_BY_VERSION
 from wgmap_backporter_studio.core.mapping_profiles import profile_from_catalog_snapshot
+from wgmap_backporter_studio.core.workspace_store import WorkspaceStore
 from wgmap_backporter_studio.core import legacy1710_engine
 from wgmap_backporter_studio.app import packaged_self_test
 
@@ -191,6 +192,44 @@ def test_content_audit_and_legacy_roundtrip():
         assert audit["entity_types"]["minecraft:cow"] == 1
 
 
+
+
+def test_workspace_store_persistence():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "Documents" / "WG Map Backporter Studio"
+        store = WorkspaceStore(root)
+        store.ensure_layout()
+        assert store.catalogs_dir.is_dir()
+        assert store.workspaces_dir.is_dir()
+        assert store.exports_dir.is_dir()
+
+        catalog = {
+            "schema": 1,
+            "kind": "mod_block_catalog",
+            "source": "/mods/demo.jar",
+            "mod_ids": ["demo"],
+            "mod_name": "Demo Blocks",
+            "mod_version": "1.0",
+            "blocks": [],
+        }
+        catalog_path = store.save_catalog_snapshot(catalog)
+        assert catalog_path.parent == store.catalogs_dir
+        assert json.loads(catalog_path.read_text(encoding="utf-8"))["mod_ids"] == ["demo"]
+
+        workspace = {
+            "schema": 1,
+            "kind": "catalog_workspace",
+            "sources": [{"enabled": True, "label": "Demo Blocks", "catalog": catalog}],
+        }
+        autosave = store.save_default_workspace(workspace)
+        assert autosave == store.default_workspace_path
+        restored = store.load_default_workspace()
+        assert restored is not None
+        assert restored["sources"][0]["enabled"] is True
+
+        copy = store.save_workspace_copy(store.workspaces_dir / "copy.json", workspace)
+        assert copy.is_file()
+
 def test_staged_output_promotion():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
@@ -216,6 +255,7 @@ def main():
     test_catalog_bound_mapping_profile()
     test_content_audit_and_legacy_roundtrip()
     test_staged_output_promotion()
+    test_workspace_store_persistence()
     assert packaged_self_test() == 0
     with tempfile.TemporaryDirectory() as td:
         td = Path(td); jar = td / "demo.jar"; make_fake_jar(jar)

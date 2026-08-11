@@ -7,8 +7,8 @@ import traceback
 import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
-from PySide6.QtGui import QFontMetrics, QPixmap
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot, QStandardPaths, QUrl
+from PySide6.QtGui import QDesktopServices, QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -22,6 +22,7 @@ from ..core.jar_analyzer import analyze_jar, read_texture_bytes
 from ..core.legacy1710_engine import run_conversion, run_conversion_preflight
 from ..core.modpack_analyzer import analyze_modpack
 from ..core.version_targets import TARGETS
+from ..core.workspace_store import WorkspaceStore
 
 
 class FunctionWorker(QObject):
@@ -49,6 +50,13 @@ def _title(text: str, subtitle: str) -> QVBoxLayout:
     box = QVBoxLayout()
     t = QLabel(text); t.setObjectName("pageTitle")
     box.addWidget(t); box.addWidget(_muted(subtitle)); return box
+
+
+def _application_storage_root() -> Path:
+    """Resolve the user-visible persistent storage root under Documents."""
+    documents = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+    base = Path(documents) if documents else (Path.home() / "Documents")
+    return base / APP_NAME
 
 
 
@@ -754,8 +762,10 @@ class BackportTab(AsyncTab):
 
 
 class JarAnalyzerTab(AsyncTab):
-    def __init__(self):
-        super().__init__(); self.catalog = None
+    addCatalogRequested = Signal(object)
+
+    def __init__(self, store: WorkspaceStore | None = None):
+        super().__init__(); self.catalog = None; self._store = store
         root = QVBoxLayout(self); root.addLayout(_title(
             "Mod / JAR Analyzer",
             "Build a visual block-asset catalog from a mod JAR. This is useful when deciding what an older modpack can substitute during a map backport."
@@ -773,8 +783,15 @@ class JarAnalyzerTab(AsyncTab):
         side = QWidget(); sl = QVBoxLayout(side); self.preview = QLabel("Select a block to preview its first packaged texture."); self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumSize(250, 250); self.preview.setWordWrap(True)
         self.preview.setStyleSheet("background:#0b0f14;border:1px solid #303b48;border-radius:8px;")
         sl.addWidget(self.preview, 1); self.notes = QPlainTextEdit(); self.notes.setReadOnly(True); self.notes.setMaximumHeight(150); sl.addWidget(self.notes); splitter.addWidget(side); splitter.setChildrenCollapsible(False); splitter.setSizes([800, 320]); root.addWidget(splitter, 1)
-        bottom = QHBoxLayout(); self.export = QPushButton("Export catalog JSON…"); self.export.setEnabled(False); bottom.addStretch(); bottom.addWidget(self.export); root.addLayout(bottom)
-        browse.clicked.connect(self._browse); analyze.clicked.connect(self._analyze); self.export.clicked.connect(self._export); self.table.itemSelectionChanged.connect(self._preview_selected)
+        bottom = QHBoxLayout()
+        self.add_to_workspace = QPushButton("Add to Catalog Workspace")
+        self.add_to_workspace.setEnabled(False)
+        self.export = QPushButton("Export catalog JSON…")
+        self.export.setEnabled(False)
+        bottom.addStretch(); bottom.addWidget(self.add_to_workspace); bottom.addWidget(self.export); root.addLayout(bottom)
+        browse.clicked.connect(self._browse); analyze.clicked.connect(self._analyze)
+        self.add_to_workspace.clicked.connect(self._add_to_workspace)
+        self.export.clicked.connect(self._export); self.table.itemSelectionChanged.connect(self._preview_selected)
 
     def _browse(self):
         p, _ = QFileDialog.getOpenFileName(self, "Select mod JAR", self.jar.text() or str(Path.home()), "Java archives (*.jar);;All files (*)")
@@ -805,7 +822,10 @@ class JarAnalyzerTab(AsyncTab):
                     item.setData(Qt.UserRole, r)
                 self.table.setItem(r, c, item)
         self.table.setSortingEnabled(True)
-        self.notes.setPlainText("\n".join(cat.notes)); self.export.setEnabled(True); self.preview.setText("Select a block to preview its first packaged texture.")
+        self.notes.setPlainText("\n".join(cat.notes))
+        self.add_to_workspace.setEnabled(True)
+        self.export.setEnabled(True)
+        self.preview.setText("Select a block to preview its first packaged texture.")
 
     def _preview_selected(self):
         if not self.catalog: return
@@ -826,16 +846,27 @@ class JarAnalyzerTab(AsyncTab):
         except Exception as e:
             self.preview.setPixmap(QPixmap()); self.preview.setText(f"Preview failed:\n{e}")
 
+    def _add_to_workspace(self):
+        if not self.catalog:
+            return
+        self.addCatalogRequested.emit(self.catalog.to_dict())
+
     def _export(self):
         if not self.catalog: return
         suggested = (self.catalog.mod_ids[0] if self.catalog.mod_ids else "mod") + "-block-catalog.json"
-        p, _ = QFileDialog.getSaveFileName(self, "Export block catalog", suggested, "JSON (*.json)")
+        start = Path(suggested)
+        if self._store is not None:
+            self._store.ensure_layout()
+            start = self._store.catalogs_dir / suggested
+        p, _ = QFileDialog.getSaveFileName(self, "Export block catalog", str(start), "JSON (*.json)")
         if p: self.catalog.save(p)
 
 
 class ModpackAnalyzerTab(AsyncTab):
-    def __init__(self):
-        super().__init__(); self.analysis = None
+    addAnalysisRequested = Signal(object)
+
+    def __init__(self, store: WorkspaceStore | None = None):
+        super().__init__(); self.analysis = None; self._store = store
         root = QVBoxLayout(self); root.addLayout(_title(
             "Modpack Analyzer",
             "Inspect the mods physically present in an instance or export. CurseForge manifests are recognized; missing JARs remain explicitly unresolved."
@@ -849,8 +880,15 @@ class ModpackAnalyzerTab(AsyncTab):
         _configure_resizable_columns(self.table, modpack_labels)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True); root.addWidget(self.table, 1)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(170); root.addWidget(self.log)
-        bottom = QHBoxLayout(); self.export = QPushButton("Export combined analysis…"); self.export.setEnabled(False); bottom.addStretch(); bottom.addWidget(self.export); root.addLayout(bottom)
-        browse_folder.clicked.connect(self._folder); browse_zip.clicked.connect(self._zip); run.clicked.connect(self._run); self.export.clicked.connect(self._export)
+        bottom = QHBoxLayout()
+        self.add_to_workspace = QPushButton("Add catalogs to Workspace")
+        self.add_to_workspace.setEnabled(False)
+        self.export = QPushButton("Export combined analysis…")
+        self.export.setEnabled(False)
+        bottom.addStretch(); bottom.addWidget(self.add_to_workspace); bottom.addWidget(self.export); root.addLayout(bottom)
+        browse_folder.clicked.connect(self._folder); browse_zip.clicked.connect(self._zip); run.clicked.connect(self._run)
+        self.add_to_workspace.clicked.connect(self._add_to_workspace)
+        self.export.clicked.connect(self._export)
 
     def _folder(self):
         p = QFileDialog.getExistingDirectory(self, "Select modpack instance", self.path.text() or str(Path.home()))
@@ -871,22 +909,37 @@ class ModpackAnalyzerTab(AsyncTab):
                 for c, v in enumerate(vals): self.table.setItem(r, c, QTableWidgetItem(v))
             self.table.setSortingEnabled(True)
             if rep.notes: self.log.appendPlainText("\n".join(rep.notes))
+            self.add_to_workspace.setEnabled(bool(rep.block_catalogs))
             self.export.setEnabled(True)
         def err(tb): self.summary.setText("Analysis failed."); self.log.appendPlainText(tb); QMessageBox.critical(self, "Modpack analysis failed", tb)
         self.launch(work, done, err, self.log.appendPlainText)
+    def _add_to_workspace(self):
+        if not self.analysis:
+            return
+        self.addAnalysisRequested.emit(self.analysis.to_dict())
+
     def _export(self):
         if not self.analysis: return
-        p, _ = QFileDialog.getSaveFileName(self, "Export modpack analysis", "modpack-block-analysis.json", "JSON (*.json)")
+        start = Path("modpack-block-analysis.json")
+        if self._store is not None:
+            self._store.ensure_layout()
+            start = self._store.catalogs_dir / start
+        p, _ = QFileDialog.getSaveFileName(self, "Export modpack analysis", str(start), "JSON (*.json)")
         if p: self.analysis.save(p)
 
 
 class CatalogTab(QWidget):
     workspaceChanged = Signal()
+    storageMessage = Signal(str)
 
-    def __init__(self):
+    def __init__(self, store: WorkspaceStore):
         super().__init__()
+        self._store = store
+        self._store.ensure_layout()
         self.sources: list[dict] = []
         self._source_serial = 0
+        self._restoring_workspace = False
+
         root = QVBoxLayout(self); root.addLayout(_title(
             "Catalog Workspace",
             "Combine multiple catalogs, toggle target mods on/off, and define the active target pool used by Map Backporter's reviewed safe mapping rules."
@@ -896,19 +949,26 @@ class CatalogTab(QWidget):
         add = QPushButton("Add catalog(s)…")
         remove = QPushButton("Remove selected")
         clear = QPushButton("Clear all")
-        save = QPushButton("Save workspace…")
+        save = QPushButton("Save workspace copy…")
+        storage = QPushButton("Storage folder")
         self.search = QLineEdit(); self.search.setPlaceholderText("Search registry, display name, mod, candidate kind or evidence…")
-        toolbar.addWidget(add); toolbar.addWidget(remove); toolbar.addWidget(clear); toolbar.addWidget(save)
+        toolbar.addWidget(add); toolbar.addWidget(remove); toolbar.addWidget(clear); toolbar.addWidget(save); toolbar.addWidget(storage)
         toolbar.addSpacing(10); toolbar.addWidget(self.search, 1)
         root.addLayout(toolbar)
 
         self.summary = _muted("No catalogs loaded yet.")
         root.addWidget(self.summary)
+        self.autosave_info = _muted(
+            f"Automatically remembered in {self._store.default_workspace_path}"
+        )
+        root.addWidget(self.autosave_info)
 
         splitter = QSplitter(Qt.Horizontal)
         source_panel = QGroupBox("Loaded catalogs")
         source_layout = QVBoxLayout(source_panel)
-        source_layout.addWidget(_muted("Checked catalogs contribute blocks to the active workspace and enable their mod namespaces for reviewed Backporter mapping rules."))
+        source_layout.addWidget(_muted(
+            "Checked catalogs contribute blocks to the active workspace and enable their mod namespaces for reviewed Backporter mapping rules."
+        ))
         self.source_list = QListWidget()
         self.source_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         source_layout.addWidget(self.source_list, 1)
@@ -929,8 +989,11 @@ class CatalogTab(QWidget):
         remove.clicked.connect(self._remove_selected)
         clear.clicked.connect(self._clear)
         save.clicked.connect(self._save_workspace)
+        storage.clicked.connect(self._open_storage_folder)
         self.search.textChanged.connect(self._refresh)
         self.source_list.itemChanged.connect(self._source_toggled)
+
+        self._restore_default_workspace()
 
     def _catalog_label(self, catalog: dict, fallback: str = "Catalog") -> str:
         name = str(catalog.get("mod_name") or "").strip()
@@ -949,14 +1012,42 @@ class CatalogTab(QWidget):
         version = str(catalog.get("mod_version") or "")
         return f"{source}\n{mod_id}\n{version}"
 
+    def _workspace_payload(self) -> dict:
+        return {
+            "schema": 1,
+            "kind": "catalog_workspace",
+            "sources": [
+                {
+                    "enabled": bool(source["enabled"]),
+                    "label": source["label"],
+                    "catalog": source["catalog"],
+                }
+                for source in self.sources
+            ],
+        }
+
+    def _autosave_workspace(self) -> None:
+        try:
+            path = self._store.save_default_workspace(self._workspace_payload())
+            self.autosave_info.setText(f"Automatically remembered in {path}")
+        except Exception as exc:
+            self.autosave_info.setText(f"Workspace autosave failed: {exc}")
+            self.storageMessage.emit(f"Catalog Workspace autosave failed: {exc}")
+
+    def _after_workspace_mutation(self, message: str = "") -> None:
+        self._refresh()
+        if not self._restoring_workspace:
+            self._autosave_workspace()
+            self.workspaceChanged.emit()
+            if message:
+                self.storageMessage.emit(message)
+
     def _append_catalog(self, catalog: dict, enabled: bool = True, fallback: str = "Catalog") -> bool:
         if not isinstance(catalog, dict) or catalog.get("kind") != "mod_block_catalog":
             return False
         identity = self._catalog_identity(catalog)
         for source in self.sources:
             if source["identity"] == identity:
-                # Re-loading the exact same catalog should not silently duplicate
-                # every block row. Re-enable the existing source instead.
                 source["enabled"] = True
                 item = source.get("item")
                 if item is not None:
@@ -979,17 +1070,24 @@ class CatalogTab(QWidget):
         source_path = str(catalog.get("source") or "")
         stats = catalog.get("analysis_stats") or {}
         details = [source_path] if source_path else []
-        if stats:
-            details.append(f"{len(catalog.get('blocks', []) or []):,} block candidates")
-            if stats.get("packaged_model_assets"):
-                details.append(f"{int(stats['packaged_model_assets']):,} packaged models")
+        details.append(f"{len(catalog.get('blocks', []) or []):,} block candidates")
+        if stats.get("packaged_model_assets"):
+            details.append(f"{int(stats['packaged_model_assets']):,} packaged models")
         item.setToolTip("\n".join(details))
         entry["item"] = item
         self.sources.append(entry)
         self.source_list.addItem(item)
+
+        if not self._restoring_workspace:
+            try:
+                self._store.save_catalog_snapshot(catalog)
+            except Exception as exc:
+                self.storageMessage.emit(f"Catalog snapshot could not be stored automatically: {exc}")
         return True
 
     def _ingest_document(self, data: dict, fallback: str) -> int:
+        if not isinstance(data, dict):
+            raise ValueError("Catalog data must be a JSON object.")
         kind = data.get("kind")
         added = 0
         if kind == "mod_block_catalog":
@@ -1008,24 +1106,53 @@ class CatalogTab(QWidget):
             raise ValueError("This JSON is not a WG block catalog, modpack analysis, or catalog workspace.")
         return added
 
+    @Slot(object)
+    def add_catalog_document(self, data: object) -> None:
+        """Add analyzer output directly without requiring an export/import round trip."""
+        if not isinstance(data, dict):
+            QMessageBox.warning(self, "Catalog could not be added", "Analyzer output was not valid catalog data.")
+            return
+        try:
+            fallback = str(data.get("mod_name") or data.get("pack_name") or "Analyzer catalog")
+            added = self._ingest_document(data, fallback)
+            self._after_workspace_mutation(
+                f"Catalog Workspace updated: {added:,} new catalog source(s) added and autosaved."
+                if added else
+                "Catalog Workspace already contained this source; it was re-enabled and autosaved."
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Catalog could not be added", str(exc))
+
     def _load(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Add block catalogs or analyses", str(Path.home()), "JSON (*.json);;All files (*)")
+        self._store.ensure_layout()
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add block catalogs or analyses",
+            str(self._store.catalogs_dir),
+            "JSON (*.json);;All files (*)",
+        )
         if not paths:
             return
         added = 0
         errors = []
-        for p in paths:
+        for path in paths:
             try:
-                data = load_catalog(p)
-                added += self._ingest_document(data, Path(p).stem)
+                data = load_catalog(path)
+                added += self._ingest_document(data, Path(path).stem)
             except Exception as exc:
-                errors.append(f"{Path(p).name}: {exc}")
-        self._refresh()
-        self.workspaceChanged.emit()
+                errors.append(f"{Path(path).name}: {exc}")
+
+        self._after_workspace_mutation(
+            f"Catalog Workspace updated: {added:,} new catalog source(s) loaded and autosaved."
+        )
         if errors:
             QMessageBox.warning(self, "Some catalogs could not be loaded", "\n".join(errors))
         elif not added:
-            QMessageBox.information(self, "Catalogs already loaded", "The selected catalog data was already present in this workspace; the existing source was re-enabled.")
+            QMessageBox.information(
+                self,
+                "Catalogs already loaded",
+                "The selected catalog data was already present in this workspace; the existing source was re-enabled.",
+            )
 
     def _source_toggled(self, item: QListWidgetItem):
         source_id = item.data(Qt.UserRole)
@@ -1033,8 +1160,8 @@ class CatalogTab(QWidget):
             if source["id"] == source_id:
                 source["enabled"] = item.checkState() == Qt.Checked
                 break
-        self._refresh()
-        self.workspaceChanged.emit()
+        if not self._restoring_workspace:
+            self._after_workspace_mutation("Catalog Workspace selection changed and was autosaved.")
 
     def _remove_selected(self):
         selected_ids = {item.data(Qt.UserRole) for item in self.source_list.selectedItems()}
@@ -1044,16 +1171,47 @@ class CatalogTab(QWidget):
         for row in range(self.source_list.count() - 1, -1, -1):
             if self.source_list.item(row).data(Qt.UserRole) in selected_ids:
                 self.source_list.takeItem(row)
-        self._refresh()
-        self.workspaceChanged.emit()
+        self._after_workspace_mutation("Selected catalog source(s) removed and workspace autosaved.")
 
     def _clear(self):
         if not self.sources:
             return
         self.sources.clear()
         self.source_list.clear()
+        self._after_workspace_mutation("Catalog Workspace cleared and autosaved.")
+
+    def _restore_default_workspace(self):
+        try:
+            payload = self._store.load_default_workspace()
+        except Exception as exc:
+            self.autosave_info.setText(
+                f"Could not restore {self._store.default_workspace_path}: {exc}"
+            )
+            return
+        if not payload:
+            self._refresh()
+            return
+
+        self._restoring_workspace = True
+        self.source_list.blockSignals(True)
+        try:
+            self._ingest_document(payload, "Restored catalog")
+        finally:
+            self.source_list.blockSignals(False)
+            self._restoring_workspace = False
         self._refresh()
-        self.workspaceChanged.emit()
+        self.storageMessage.emit(
+            f"Restored {len(self.sources):,} catalog source(s) from the default workspace."
+        )
+
+    def _open_storage_folder(self):
+        self._store.ensure_layout()
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._store.root))):
+            QMessageBox.information(
+                self,
+                "Storage folder",
+                f"WG Map Backporter Studio stores persistent user data in:\n\n{self._store.root}",
+            )
 
     def _active_rows(self) -> list[dict]:
         rows: list[dict] = []
@@ -1096,8 +1254,9 @@ class CatalogTab(QWidget):
         q = self.search.text().strip().lower()
         rows = []
         for block in active_rows:
-            hay = " ".join(str(block.get(k, "")) for k in (
-                "registry_hint", "display_name", "source_mod", "confidence", "evidence", "candidate_kind", "localization_locale"
+            hay = " ".join(str(block.get(key, "")) for key in (
+                "registry_hint", "display_name", "source_mod", "confidence",
+                "evidence", "candidate_kind", "localization_locale"
             )).lower()
             if not q or q in hay:
                 rows.append(block)
@@ -1111,8 +1270,8 @@ class CatalogTab(QWidget):
 
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
-        for r, block in enumerate(rows):
-            vals = [
+        for row_index, block in enumerate(rows):
+            values = [
                 block.get("registry_hint", ""),
                 block.get("display_name", ""),
                 block.get("source_mod", ""),
@@ -1120,30 +1279,26 @@ class CatalogTab(QWidget):
                 block.get("evidence", ""),
                 str(len(block.get("texture_paths", []) or [])),
             ]
-            for c, value in enumerate(vals):
-                self.table.setItem(r, c, QTableWidgetItem(str(value)))
+            for column, value in enumerate(values):
+                self.table.setItem(row_index, column, QTableWidgetItem(str(value)))
         self.table.setSortingEnabled(True)
 
     def _save_workspace(self):
         if not self.sources:
             QMessageBox.information(self, "Nothing to save", "Add at least one catalog before saving a workspace.")
             return
-        p, _ = QFileDialog.getSaveFileName(self, "Save catalog workspace", "wg-catalog-workspace.json", "JSON (*.json)")
-        if not p:
+        self._store.ensure_layout()
+        suggested = self._store.workspaces_dir / "wg-catalog-workspace.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save catalog workspace copy", str(suggested), "JSON (*.json)"
+        )
+        if not path:
             return
-        payload = {
-            "schema": 1,
-            "kind": "catalog_workspace",
-            "sources": [
-                {
-                    "enabled": bool(source["enabled"]),
-                    "label": source["label"],
-                    "catalog": source["catalog"],
-                }
-                for source in self.sources
-            ],
-        }
-        Path(p).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            saved = self._store.save_workspace_copy(path, self._workspace_payload())
+            self.storageMessage.emit(f"Saved catalog workspace copy to {saved}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Workspace save failed", str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -1151,14 +1306,33 @@ class MainWindow(QMainWindow):
         super().__init__(); self.setWindowTitle(f"{APP_NAME} {__version__}"); self.resize(1260, 820); self.setMinimumSize(980, 740)
         root = QWidget(); root.setObjectName("rootWindow"); layout = QVBoxLayout(root); layout.setContentsMargins(18, 16, 18, 12)
         header = QHBoxLayout(); brand = QLabel(APP_NAME); brand.setObjectName("sectionTitle"); header.addWidget(brand); header.addStretch(); header.addWidget(_muted(f"v{__version__}")); layout.addLayout(header)
+
+        self._store = WorkspaceStore(_application_storage_root())
+        self._store.ensure_layout()
+
         tabs = QTabWidget(); tabs.setDocumentMode(True)
-        catalog_tab = CatalogTab()
+        catalog_tab = CatalogTab(self._store)
         backport_tab = BackportTab(catalog_provider=catalog_tab.active_catalog_snapshot)
+        jar_tab = JarAnalyzerTab(self._store)
+        modpack_tab = ModpackAnalyzerTab(self._store)
+
         catalog_tab.workspaceChanged.connect(backport_tab.catalog_workspace_changed)
+        catalog_tab.storageMessage.connect(lambda message: self.statusBar().showMessage(message, 8000))
+
+        def add_to_workspace(data):
+            catalog_tab.add_catalog_document(data)
+            tabs.setCurrentWidget(catalog_tab)
+
+        jar_tab.addCatalogRequested.connect(add_to_workspace)
+        modpack_tab.addAnalysisRequested.connect(add_to_workspace)
+
         tabs.addTab(DashboardTab(), "Overview")
         tabs.addTab(backport_tab, "Map Backporter")
-        tabs.addTab(JarAnalyzerTab(), "Mod / JAR Analyzer")
-        tabs.addTab(ModpackAnalyzerTab(), "Modpack Analyzer")
+        tabs.addTab(jar_tab, "Mod / JAR Analyzer")
+        tabs.addTab(modpack_tab, "Modpack Analyzer")
         tabs.addTab(catalog_tab, "Catalog Workspace")
         layout.addWidget(tabs, 1)
-        self.setCentralWidget(root); self.statusBar().showMessage("Ready — conversions never modify the selected source map or template world in place.")
+        self.setCentralWidget(root)
+        self.statusBar().showMessage(
+            f"Ready — persistent catalogs/workspaces: {self._store.root}"
+        )

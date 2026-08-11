@@ -59,7 +59,21 @@ Local instances, ZIPs, and CurseForge-style exports can be scanned to build a co
 
 ### Catalog Workspace
 
-The workspace can combine multiple individual mod catalogs and modpack analyses at the same time. Each loaded catalog can be enabled/disabled independently, removed, searched as part of the active target-block pool, and saved in a reusable workspace JSON. The Map Backporter now consumes that enabled set as a live mapping profile: enabled mod IDs permit the converter's reviewed safe rules for those namespaces, while the target world's Forge registry remains authoritative for the actual block IDs. Catalogs do not automatically invent unreviewed source→target mappings.
+The workspace can combine multiple individual mod catalogs and modpack analyses at the same time. Each loaded catalog can be enabled/disabled independently, removed, searched as part of the active target-block pool, and saved in a reusable workspace JSON. Analyzer results can also be sent directly into Catalog Workspace without an export/import round trip.
+
+Catalog Workspace is persistent by default. On first use, the desktop application creates a user-visible storage tree under the platform Documents location:
+
+```text
+WG Map Backporter Studio/
+├── Catalogs/
+├── Workspaces/
+│   └── default-workspace.json
+└── Exports/
+```
+
+Adding, removing, enabling, or disabling a catalog automatically updates `default-workspace.json`, and that workspace is restored on the next application launch. Catalog snapshots added to the workspace are also stored under `Catalogs/`. Manual **Save workspace copy…** and JSON export actions remain available for sharing or archival.
+
+The Map Backporter consumes the enabled catalog set as a live mapping profile: enabled mod IDs permit the converter's reviewed safe rules for those namespaces, while the target world's Forge registry remains authoritative for the actual block IDs. Catalogs do not automatically invent unreviewed source→target mappings.
 
 ## Target versions
 

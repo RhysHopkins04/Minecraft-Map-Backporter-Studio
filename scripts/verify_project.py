@@ -54,6 +54,7 @@ required = [
     "src/wgmap_backporter_studio/app.py",
     "src/wgmap_backporter_studio/core/legacy1710_engine.py",
     "src/wgmap_backporter_studio/core/mapping_profiles.py",
+    "src/wgmap_backporter_studio/core/workspace_store.py",
     "src/wgmap_backporter_studio/ui/main_window.py",
     "tests/test_smoke.py",
 ]
@@ -532,7 +533,17 @@ for token in [
     'QPushButton("Add catalog(s)…")',
     'QPushButton("Remove selected")',
     'QPushButton("Clear all")',
-    'QPushButton("Save workspace…")',
+    'QPushButton("Save workspace copy…")',
+    'QPushButton("Storage folder")',
+    'QPushButton("Add to Catalog Workspace")',
+    'QPushButton("Add catalogs to Workspace")',
+    'addCatalogRequested = Signal(object)',
+    'addAnalysisRequested = Signal(object)',
+    'def add_catalog_document(self, data: object) -> None:',
+    'def _restore_default_workspace(self):',
+    'def _autosave_workspace(self) -> None:',
+    'self._store.save_catalog_snapshot(catalog)',
+    'self._store.save_default_workspace(self._workspace_payload())',
     'self.source_list = QListWidget()',
     'item.setCheckState(Qt.Checked if enabled else Qt.Unchecked)',
     'elif kind == "modpack_block_analysis":',
@@ -544,6 +555,38 @@ for token in [
 ]:
     if token not in main_window:
         error(f"Multi-catalog/analyzer interaction invariant missing: {token}")
+
+
+workspace_store_path = root / "src/wgmap_backporter_studio/core/workspace_store.py"
+workspace_store = workspace_store_path.read_text(encoding="utf-8") if workspace_store_path.exists() else ""
+for token in [
+    "class WorkspaceStore:",
+    'self.catalogs_dir = self.root / "Catalogs"',
+    'self.workspaces_dir = self.root / "Workspaces"',
+    'self.exports_dir = self.root / "Exports"',
+    'self.default_workspace_path = self.workspaces_dir / "default-workspace.json"',
+    "def save_default_workspace(",
+    "def load_default_workspace(",
+    "def save_catalog_snapshot(",
+    "def save_workspace_copy(",
+    "os.replace(temporary, path)",
+]:
+    if token not in workspace_store:
+        error(f"Persistent workspace storage invariant missing: {token}")
+
+for token in [
+    "QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)",
+    "return base / APP_NAME",
+    "WorkspaceStore(_application_storage_root())",
+    "CatalogTab(self._store)",
+    "JarAnalyzerTab(self._store)",
+    "ModpackAnalyzerTab(self._store)",
+    "jar_tab.addCatalogRequested.connect(add_to_workspace)",
+    "modpack_tab.addAnalysisRequested.connect(add_to_workspace)",
+    "tabs.setCurrentWidget(catalog_tab)",
+]:
+    if token not in main_window:
+        error(f"Analyzer/workspace persistence wiring invariant missing: {token}")
 
 
 mapping_profile_path = root / "src/wgmap_backporter_studio/core/mapping_profiles.py"

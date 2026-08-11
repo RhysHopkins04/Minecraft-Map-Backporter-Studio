@@ -164,3 +164,19 @@ Before a requested output world is exposed, verify the staged-output lifecycle:
 If any chunk or round-trip verification fails, the requested output world must remain absent. The staging directory must be cleaned up, and external `<output>.WG_BACKPORT_FAILED_REPORT.json/.txt` diagnostics must be written beside the requested output location.
 
 For the next packaged functional conversion test, use a disposable output path and first run **Preflight conversion**. Confirm the content-audit counts are plausible before clicking Convert. On a successful conversion, confirm the report says `Output status: PROMOTED`, converted/verified region and chunk counts match, the loss manifest is explicit, and the application says the output requests target-side relighting. Only then open the converted world in the exact target Forge 1.7.10 modpack.
+
+## Analyzer → Catalog Workspace and persistence validation
+
+Before the next integrated map conversion test, verify the packaged application also preserves the analyzer/workspace workflow:
+
+- analyse a known JAR and confirm **Add to Catalog Workspace** is enabled beside **Export catalog JSON…**;
+- click **Add to Catalog Workspace** and confirm the catalog appears immediately without exporting/re-importing JSON;
+- analyse a local modpack and confirm **Add catalogs to Workspace** adds its available embedded mod catalogs directly;
+- confirm the application creates `WG Map Backporter Studio/Catalogs`, `Workspaces`, and `Exports` under the platform Documents location;
+- confirm `Workspaces/default-workspace.json` is updated automatically after adding/removing a catalog and after changing a catalog checkbox;
+- restart the packaged application and confirm the default workspace, source enable/disable state, and active candidate pool are restored automatically;
+- confirm a directly added analyzer catalog is also snapshotted under the application `Catalogs` directory;
+- confirm **Save workspace copy…** defaults to the application `Workspaces` directory while remaining user-selectable;
+- confirm **Export catalog JSON…** and **Export combined analysis…** default to the application `Catalogs` directory while remaining user-selectable;
+- confirm **Storage folder** opens the user-visible application storage root;
+- after restoring a workspace, run Map Backporter preflight and confirm the restored enabled catalogs participate in the active mapping profile exactly as they did before restart.
