@@ -36,7 +36,7 @@ try:
 except Exception:
     np = None
 
-TOOL_VERSION = "0.2.0"
+TOOL_VERSION = "0.2.1"
 AIR_NAMES = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
 
 # Minecraft dye/block metadata ordering in legacy 1.7.10.
@@ -329,10 +329,23 @@ class Mapping:
     note: str = ""
 
 
+FML_BLOCK_DISCRIMINATOR = "\x01"
+FML_ITEM_DISCRIMINATOR = "\x02"
+TARGET_REGISTRY_SENTINELS = (
+    "minecraft:air", "minecraft:stone", "minecraft:bedrock", "minecraft:dirt",
+    "minecraft:grass", "minecraft:water", "minecraft:planks", "minecraft:cobblestone",
+)
+
+
 class TargetRegistry:
-    def __init__(self, ids):
+    def __init__(self, ids, *, source_format="unknown", raw_entries=0, ignored_items=0, aliases=None):
         self.ids=dict(ids)
+        self.source_format=source_format
+        self.raw_entries=int(raw_entries)
+        self.ignored_items=int(ignored_items)
+        self.aliases=dict(aliases or {})
         self._lower={k.lower():v for k,v in self.ids.items()}
+        self._aliases_lower={str(k).lower():str(v) for k,v in self.aliases.items()}
         self._hbm_by_logical={}
         for k,v in self.ids.items():
             if k.lower().startswith("hbm:"):
@@ -342,7 +355,17 @@ class TargetRegistry:
 
     def resolve(self, name):
         if name in self.ids: return self.ids[name]
-        return self._lower.get(name.lower())
+        lowered=name.lower()
+        direct=self._lower.get(lowered)
+        if direct is not None: return direct
+        seen=set()
+        alias=self._aliases_lower.get(lowered)
+        while alias and alias.lower() not in seen:
+            seen.add(alias.lower())
+            direct=self._lower.get(alias.lower())
+            if direct is not None: return direct
+            alias=self._aliases_lower.get(alias.lower())
+        return None
 
     def resolve_hbm(self, logical):
         return self._hbm_by_logical.get(logical.lower())
@@ -350,30 +373,115 @@ class TargetRegistry:
     def has_hbm(self, logical):
         return logical.lower() in self._hbm_by_logical
 
+    @property
+    def hbm_count(self):
+        return len(self._hbm_by_logical)
+
+    def summary(self):
+        ignored=("; %d item entries ignored" % self.ignored_items) if self.ignored_items else ""
+        return "%d block IDs from %s (%d HBM entries%s)" % (len(self.ids),self.source_format,self.hbm_count,ignored)
+
+
+def _block_aliases_from_fml(fml):
+    aliases={}
+    for e in fml.get("BlockAliases",[]) if isinstance(fml,dict) else []:
+        if isinstance(e,dict) and "K" in e and "V" in e:
+            aliases[str(e["K"])]=str(e["V"])
+    return aliases
+
+
+def _target_registry_from_fml(fml):
+    if not isinstance(fml,dict):
+        raise ConversionError("Target/template level.dat has no readable Forge FML compound")
+
+    # Forge 1.8+ style registry snapshots use a dedicated fml:blocks registry
+    # containing plain names. Keep support for those snapshots because template
+    # worlds can occasionally be passed through newer tooling before use here.
+    registries=fml.get("Registries",{})
+    blocks=registries.get("fml:blocks",{}) if isinstance(registries,dict) else {}
+    entries=blocks.get("ids",[]) if isinstance(blocks,dict) else []
+    ids={}
+    for e in entries:
+        if not isinstance(e,dict) or "K" not in e or "V" not in e: continue
+        name=str(e["K"]); value=int(e["V"])
+        if name and name[0] in (FML_BLOCK_DISCRIMINATOR,FML_ITEM_DISCRIMINATOR):
+            name=name[1:]
+        if name: ids[name]=value
+    if ids:
+        return TargetRegistry(ids,source_format="FML/Registries/fml:blocks",raw_entries=len(entries),aliases=_block_aliases_from_fml(fml))
+
+    # Forge/FML 1.7.10 stores BOTH blocks and items in FML/ItemData. The first
+    # character is a type discriminator: U+0001 for blocks, U+0002 for items.
+    # The previous parser kept that hidden character and mixed both registries,
+    # producing thousands of unusable names such as '\x01minecraft:stone'.
+    item_data=fml.get("ItemData",[])
+    if isinstance(item_data,list) and item_data:
+        block_ids={}; ignored_items=0; malformed=0
+        for e in item_data:
+            if not isinstance(e,dict) or "K" not in e or "V" not in e:
+                malformed+=1; continue
+            raw_name=str(e["K"]); value=int(e["V"])
+            if raw_name.startswith(FML_BLOCK_DISCRIMINATOR):
+                name=raw_name[1:]
+                if name: block_ids[name]=value
+            elif raw_name.startswith(FML_ITEM_DISCRIMINATOR):
+                ignored_items+=1
+            else:
+                malformed+=1
+        if not block_ids:
+            raise ConversionError(
+                "Forge FML/ItemData exists but contains no U+0001 block entries. "
+                "The template is not a usable Forge 1.7.10 registry snapshot; open/save it once in the exact target 1.7.10 modpack and try again."
+            )
+        reg=TargetRegistry(
+            block_ids, source_format="Forge 1.7.10 FML/ItemData", raw_entries=len(item_data),
+            ignored_items=ignored_items, aliases=_block_aliases_from_fml(fml),
+        )
+        reg.malformed_entries=malformed
+        return reg
+
+    if fml.get("ModItemData"):
+        raise ConversionError(
+            "The template world uses Forge's pre-1.7.10 ModItemData registry format. "
+            "Load and save that world in Forge 1.7.10 first so FML writes the 1.7.10 ItemData map, then select the migrated template."
+        )
+
+    raise ConversionError(
+        "Could not find a supported Forge block ID registry in target level.dat. "
+        "Create/open the template world once in the exact Forge 1.7.10 modpack (with the intended mods/RTG), save, quit, then select it again."
+    )
+
 
 def load_target_registry(world: Path):
     level=world/"level.dat"
     if not level.is_file(): raise ConversionError("Target/template world has no level.dat: %s" % world)
-    with gzip.open(level,"rb") as f: raw=f.read()
-    _,root=parse_nbt(raw)
-    fml=root.get("FML",{})
-    registries=fml.get("Registries",{})
-    blocks=registries.get("fml:blocks",{})
-    ids={}
-    for e in blocks.get("ids",[]) if isinstance(blocks,dict) else []:
-        if isinstance(e,dict) and "K" in e and "V" in e: ids[str(e["K"])]=int(e["V"])
-    if not ids:
-        # Early 1.7 compatibility format.
-        for e in fml.get("ItemData",[]) if isinstance(fml,dict) else []:
-            if not isinstance(e,dict): continue
-            if "K" in e and "V" in e: ids[str(e["K"])]=int(e["V"])
-            elif "ItemName" in e and "ItemId" in e: ids[str(e["ItemName"])]=int(e["ItemId"])
-    if not ids:
+    try:
+        with gzip.open(level,"rb") as f: raw=f.read()
+        _,root=parse_nbt(raw)
+    except Exception as e:
+        raise ConversionError("Could not read target/template level.dat: %s" % e) from e
+    return _target_registry_from_fml(root.get("FML",{}))
+
+
+def validate_target_registry(reg: TargetRegistry, use_hbm=True, log=print):
+    missing=[name for name in TARGET_REGISTRY_SENTINELS if reg.resolve(name) is None]
+    if missing:
         raise ConversionError(
-            "Could not find Forge's fml:blocks ID registry in target level.dat. "
-            "Create/open the template world once in the exact Forge 1.7.10 modpack (with HBM/RTG), save, quit, then select it again."
+            "Target registry parsed as %s but is missing required vanilla block names: %s. "
+            "Refusing to create an output world because the target registry is not safe to use."
+            % (reg.source_format, ", ".join(missing))
         )
-    return TargetRegistry(ids)
+    bad=[(name,value) for name,value in reg.ids.items() if not (0 <= int(value) <= 4095)]
+    if bad:
+        sample=", ".join("%s=%s"%x for x in bad[:5])
+        raise ConversionError("Target block registry contains IDs outside the 1.7.10 block range 0..4095: %s" % sample)
+    log("Target registry: %s" % reg.summary())
+    if use_hbm and reg.hbm_count == 0:
+        log("WARNING: safe mod architectural replacements are enabled, but the target registry contains no HBM block entries; vanilla fallbacks will be used.")
+    return {
+        "source_format":reg.source_format, "block_ids":len(reg.ids), "raw_entries":reg.raw_entries,
+        "ignored_item_entries":reg.ignored_items, "hbm_entries":reg.hbm_count,
+    }
 
 
 def boolprop(props,k): return str(props.get(k,"false")).lower()=="true"
@@ -814,6 +922,83 @@ def resolve_mapping(mapping: Mapping, reg: TargetRegistry):
     return rid,mapping.meta,target
 
 
+def _palette_signature(name, props):
+    return (str(name), tuple(sorted((str(k), str(v)) for k,v in (props or {}).items())))
+
+
+def preflight_source_mappings(regions, reg: TargetRegistry, use_hbm=True, y_offset=0, log=print):
+    """Parse every source chunk and resolve every in-range palette mapping before output exists.
+
+    This deliberately validates the source/target contract before cloning the template world.
+    Palette signatures are resolved once, so repeated stone/air palettes across thousands of
+    chunks do not repeat mapping work.
+    """
+    unique=set(); chunks=0; dvs=collections.Counter(); ymin=999; ymax=-999
+    unresolved={}; parse_failures=[]; mapped_targets=collections.Counter()
+    for ri,rp in enumerate(regions,1):
+        if ri == 1 or ri == len(regions) or ri % 5 == 0:
+            log("Preflight [%d/%d] %s" % (ri,len(regions),rp.name))
+        try:
+            iterator=RegionReader(rp).chunks()
+            for idx,raw in iterator:
+                try:
+                    c=parse_modern_chunk(raw)
+                    chunks+=1; dvs[str(c.get("DataVersion"))]+=1
+                    for section in c["sections"]:
+                        sy=section.get("Y"); palette=section.get("palette") or []
+                        if sy is None or not palette: continue
+                        target_base=sy*16+y_offset
+                        if target_base>255 or target_base+15<0:
+                            continue
+                        ymin=min(ymin,sy); ymax=max(ymax,sy)
+                        for name,props in palette:
+                            sig=_palette_signature(name,props)
+                            if sig in unique: continue
+                            unique.add(sig)
+                            try:
+                                mapping=map_modern(name,props,reg,use_hbm)
+                                _,_,resolved=resolve_mapping(mapping,reg)
+                                mapped_targets[resolved]+=1
+                            except Exception as exc:
+                                unresolved.setdefault(str(exc),[]).append({
+                                    "source":str(name), "properties":dict(props or {}),
+                                    "region":rp.name, "chunk_index":idx,
+                                })
+                except Exception as exc:
+                    if len(parse_failures)<20:
+                        parse_failures.append({"region":rp.name,"chunk_index":idx,"error":str(exc)})
+        except Exception as exc:
+            if len(parse_failures)<20:
+                parse_failures.append({"region":rp.name,"error":str(exc)})
+    if chunks == 0:
+        raise ConversionError("Source preflight found no readable chunks")
+    if parse_failures:
+        sample="; ".join("%s chunk %s: %s" % (x.get("region"),x.get("chunk_index","?"),x.get("error")) for x in parse_failures[:5])
+        raise ConversionError(
+            "Source preflight could not safely parse one or more chunks. No output world was created. "
+            "Examples: %s" % sample
+        )
+    if unresolved:
+        details=[]
+        for error,examples in list(unresolved.items())[:8]:
+            sources=", ".join(sorted({e["source"] for e in examples[:8]}))
+            details.append("%s (source: %s)" % (error,sources))
+        raise ConversionError(
+            "Source/target mapping preflight found %d unresolved mapping problem(s). "
+            "No output world was created. %s" % (len(unresolved),"; ".join(details))
+        )
+    info={
+        "chunks":chunks, "unique_palette_states":len(unique), "data_versions":dict(dvs),
+        "section_y_min":None if ymin==999 else ymin, "section_y_max":None if ymax==-999 else ymax,
+        "resolved_target_names":len(mapped_targets),
+    }
+    log(
+        "Preflight passed: %d chunks; %d unique in-range palette states; DataVersion(s): %s"
+        % (chunks,len(unique),", ".join(sorted(dvs)) or "unknown")
+    )
+    return info
+
+
 # ---------- Legacy NBT writer ----------
 def nbt_name(name):
     b=name.encode("utf-8"); return struct.pack(">H",len(b))+b
@@ -1018,23 +1203,45 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
     if np is None: raise ConversionError("NumPy is required. Install it with: python3 -m pip install numpy")
     if y_offset%16 != 0: raise ConversionError("Vertical offset must be a multiple of 16 (e.g. -32, -16, 0, 16)")
     source=Path(source); template=Path(template); output=Path(output)
+
+    # Fail closed before creating/cloning an output world. Forge 1.7.10 registry
+    # parsing and all source palette mappings must be proven usable first.
     reg=load_target_registry(template)
-    hbm_count=sum(1 for k in reg.ids if k.lower().startswith("hbm:"))
-    log("Target registry: %d block IDs (%d HBM entries)"%(len(reg.ids),hbm_count))
-    ensure_output(template,output)
+    registry_info=validate_target_registry(reg,use_hbm,log)
+
     report={
         "tool_version":TOOL_VERSION,"source":str(source),"template":str(template),"output":str(output),
         "settings":{"use_hbm_architectural":use_hbm,"vertical_offset":y_offset,"strip_below_y":strip_below_y},
+        "target_registry":registry_info,"preflight":{},
         "regions_total":0,"regions_converted":0,"chunks_converted":0,"chunks_failed":0,
         "chunks_cropped_above_255":0,"chunks_cropped_below_0":0,
         "data_versions":collections.Counter(),"palette_seen":collections.Counter(),
-        "mapping_quality":collections.defaultdict(set),"mapping_notes":{},"failures":[]
+        "mapping_quality":collections.defaultdict(set),"mapping_notes":{},
+        "failure_counts":collections.Counter(),"failures":[]
     }
+    max_failure_examples=200
+
+    def record_failure(entry):
+        error=str(entry.get("error","Unknown conversion failure"))
+        report["failure_counts"][error]+=1
+        if len(report["failures"])<max_failure_examples:
+            report["failures"].append(entry)
+
     with tempfile.TemporaryDirectory(prefix="wg1710_") as td:
         src_regions=discover_source_regions(source,Path(td))
         regions=[p for p in sorted(src_regions.glob("r.*.*.mca")) if p.stat().st_size>=8192]
         report["regions_total"]=len(regions)
+        if not regions:
+            raise ConversionError("Source contains no non-empty Anvil region files")
         log("Found %d non-empty region files"%len(regions))
+        log("Running source/target mapping preflight before creating the output world...")
+        report["preflight"]=preflight_source_mappings(regions,reg,use_hbm,y_offset,log)
+
+        # Only now is it safe to clone the target template. Any catastrophic
+        # registry/mapping mismatch above leaves the requested output untouched.
+        ensure_output(template,output)
+        log("Preflight is green; cloned the template world and starting conversion.")
+
         for ri,rp in enumerate(regions,1):
             chunks={}
             log("[%d/%d] %s"%(ri,len(regions),rp.name))
@@ -1046,22 +1253,28 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
                         chunks[local]=legacy; report["chunks_converted"]+=1
                     except Exception as e:
                         report["chunks_failed"]+=1
-                        report["failures"].append({"region":rp.name,"chunk_index":idx,"error":str(e)})
-                        if len(report["failures"])<=20: log("  chunk %d FAILED: %s"%(idx,e))
+                        record_failure({"region":rp.name,"chunk_index":idx,"error":str(e)})
+                        if report["chunks_failed"]<=20: log("  chunk %d FAILED: %s"%(idx,e))
                 if chunks:
                     write_region(output/"region"/rp.name,chunks)
                     report["regions_converted"]+=1
             except Exception as e:
-                report["failures"].append({"region":rp.name,"error":str(e)})
+                record_failure({"region":rp.name,"error":str(e)})
                 log("  REGION FAILED: %s"%e)
-    # JSON-serializable summary.
+
+    # JSON-serializable summary. Keep failure examples bounded and aggregate
+    # repeated errors so a bad chunk pattern cannot create a multi-megabyte report.
     serial=dict(report)
     serial["data_versions"]=dict(report["data_versions"])
     serial["palette_seen"]=dict(report["palette_seen"])
     serial["mapping_quality"]={k:sorted(v) for k,v in report["mapping_quality"].items()}
+    serial["failure_counts"]=dict(report["failure_counts"])
     (output/"WG_BACKPORT_REPORT.json").write_text(json.dumps(serial,indent=2,sort_keys=True),encoding="utf-8")
     lines=[
         "WG Modern -> 1.7.10 Backport Report", "====================================", "",
+        "Target registry: %s"%reg.summary(),
+        "Preflight chunks: %d"%report["preflight"].get("chunks",0),
+        "Preflight unique in-range palette states: %d"%report["preflight"].get("unique_palette_states",0), "",
         "Converted regions: %d / %d"%(report["regions_converted"],report["regions_total"]),
         "Converted chunks: %d"%report["chunks_converted"], "Failed chunks: %d"%report["chunks_failed"],
         "Chunks with source blocks cropped above Y=255: %d"%report["chunks_cropped_above_255"],
@@ -1071,8 +1284,12 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
     for name in sorted(report["mapping_notes"]):
         e=report["mapping_notes"][name]
         lines.append("- %s -> %s:%d [%s]%s"%(name,e["target"],e["meta"],e["quality"],(" — "+e["note"]) if e["note"] else ""))
+    if report["failure_counts"]:
+        lines += ["", "Failure summary:"]
+        for error,count in report["failure_counts"].most_common():
+            lines.append("- %d × %s"%(count,error))
     if report["failures"]:
-        lines += ["", "Failures:"]+["- "+json.dumps(x,sort_keys=True) for x in report["failures"][:200]]
+        lines += ["", "Failure examples (maximum %d):"%max_failure_examples]+["- "+json.dumps(x,sort_keys=True) for x in report["failures"]]
     (output/"WG_BACKPORT_REPORT.txt").write_text("\n".join(lines)+"\n",encoding="utf-8")
     log("Finished: %d chunks, %d failures"%(report["chunks_converted"],report["chunks_failed"]))
     log("Report: %s"%(output/"WG_BACKPORT_REPORT.txt"))

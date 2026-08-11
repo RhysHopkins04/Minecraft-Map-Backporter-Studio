@@ -75,3 +75,20 @@ For the **Map Backporter** page specifically, verify that:
 Also verify the **Mod / JAR Analyzer**, **Modpack Analyzer**, and **Catalog Workspace** tables while resizing the application horizontally. Each analyzer column starts from the same text-relative sizing rule: rendered heading width plus a fixed sort/padding allowance and a small consistent comfort margin. Columns automatically contract toward their readable minimums as the window narrows instead of remaining at oversized fixed widths. User resizing remains interactive, but a column cannot be dragged below its readable heading floor; if all floors cannot fit, use a horizontal scrollbar rather than clipping headings. Check the active sort indicator on every sortable heading, including `Registry hint`, `Confidence`, `Block candidates`, and `Texture assets`. The JAR Analyzer preview/table splitter must not collapse either child completely.
 
 The source verifier enforces the explicit Qt form/scroll sizing policy and interactive analyzer-header policy so these behaviours stay deterministic across platform styles.
+
+## Forge 1.7.10 registry and conversion preflight validation
+
+Before trusting a modern → Forge 1.7.10 conversion, verify the target/template world was opened and saved in the exact destination Forge 1.7.10 modpack. Forge 1.7.10 persists blocks and items together in `FML/ItemData`; the first character of each key distinguishes block entries (`U+0001`) from item entries (`U+0002`). The backporter must strip that discriminator, retain only block entries for block-ID resolution, and reject an unusable registry snapshot before creating an output world.
+
+Repository/runtime validation covers the following invariants:
+
+- ordinary vanilla names such as `minecraft:air`, `minecraft:stone`, and `minecraft:bedrock` resolve from a synthetic Forge 1.7.10 `ItemData` snapshot;
+- item entries are ignored instead of being mixed into the block registry;
+- HBM block names remain discoverable after the discriminator is removed;
+- a target registry missing core vanilla sentinel blocks is rejected before output creation;
+- every in-range unique source palette state is mapped and resolved during a source/target preflight before the template world is cloned;
+- preflight parse or mapping failures leave the requested output folder untouched;
+- post-preflight chunk failures are aggregated by error and only a bounded set of examples is written to the report;
+- the desktop UI distinguishes a clean conversion from a conversion that completed with chunk failures.
+
+For a packaged functional test, use a newly created/saved Forge 1.7.10 template and a new empty output path. The conversion log should identify the registry as `Forge 1.7.10 FML/ItemData`, report a nonzero HBM count when HBM is installed in that template, complete the source/target preflight, and only then state that the template was cloned and conversion started.

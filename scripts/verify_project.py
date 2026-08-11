@@ -344,6 +344,58 @@ for token in [
     if token not in main_window:
         error(f"Map Backporter cross-platform layout invariant missing: {token}")
 
+# Forge 1.7.10 stores blocks/items together in FML/ItemData with hidden
+# U+0001/U+0002 discriminator characters. Keep registry parsing and conversion
+# preflight fail-closed so a malformed target cannot create thousands of chunk failures.
+legacy_path = root / "src/wgmap_backporter_studio/core/legacy1710_engine.py"
+legacy = legacy_path.read_text(encoding="utf-8") if legacy_path.exists() else ""
+for token in [
+    'FML_BLOCK_DISCRIMINATOR = "\\x01"',
+    'FML_ITEM_DISCRIMINATOR = "\\x02"',
+    'raw_name.startswith(FML_BLOCK_DISCRIMINATOR)',
+    'name=raw_name[1:]',
+    'ignored_items+=1',
+    'source_format="Forge 1.7.10 FML/ItemData"',
+    'TARGET_REGISTRY_SENTINELS',
+    'def validate_target_registry(',
+    'def preflight_source_mappings(',
+    'Running source/target mapping preflight before creating the output world...',
+    'report["preflight"]=preflight_source_mappings',
+    '"failure_counts":collections.Counter()',
+    'max_failure_examples=200',
+    'Failure summary:',
+]:
+    if token not in legacy:
+        error(f"Forge 1.7.10 registry/preflight invariant missing: {token}")
+
+run_start = legacy.find("def run_conversion(")
+run_end = legacy.find("# ---------- Map analyzer", run_start)
+run_body = legacy[run_start:run_end] if run_start >= 0 and run_end > run_start else ""
+preflight_pos = run_body.find('preflight_source_mappings(')
+clone_pos = run_body.find('ensure_output(template,output)')
+if preflight_pos < 0 or clone_pos < 0 or preflight_pos > clone_pos:
+    error("run_conversion must finish target/source preflight before cloning the template output")
+
+test_smoke_path = root / "tests/test_smoke.py"
+test_smoke = test_smoke_path.read_text(encoding="utf-8") if test_smoke_path.exists() else ""
+for token in [
+    "def test_forge1710_itemdata_registry():",
+    '{"K":"\\x01minecraft:stone","V":1}',
+    '{"K":"\\x02hbm:some_item","V":5001}',
+    'assert reg.resolve("minecraft:stone") == 1',
+    'assert reg.ignored_items == 1',
+]:
+    if token not in test_smoke:
+        error(f"Forge 1.7.10 registry regression test missing: {token}")
+
+for token in [
+    '"Backport finished with failures"',
+    'if failed:',
+    'Conversion finished with no chunk failures.',
+]:
+    if token not in main_window:
+        error(f"Backporter result-state UI invariant missing: {token}")
+
 for token in [
     "class _AdaptiveHeaderTable(QTableWidget)",
     "def _configure_resizable_columns",

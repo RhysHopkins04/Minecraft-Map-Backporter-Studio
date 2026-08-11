@@ -362,7 +362,14 @@ class BackportTab(AsyncTab):
             return run_conversion(source, template, output, self.hbm.isChecked(), self.yoff.value(), self.strip.value(), log)
         def done(rep):
             self._set_busy(False); self._log("\nFinished.\n" + json.dumps({k: rep.get(k) for k in ("regions_converted","chunks_converted","chunks_failed","chunks_cropped_above_255","chunks_cropped_below_0")}, indent=2))
-            QMessageBox.information(self, "Backport complete", "Conversion finished. Review WG_BACKPORT_REPORT.txt in the output world before opening it in Minecraft.")
+            failed = int(rep.get("chunks_failed", 0) or 0)
+            if failed:
+                QMessageBox.warning(
+                    self, "Backport finished with failures",
+                    f"Conversion completed, but {failed:,} chunk(s) failed. Do not use the output world yet; review WG_BACKPORT_REPORT.txt first."
+                )
+            else:
+                QMessageBox.information(self, "Backport complete", "Conversion finished with no chunk failures. Review WG_BACKPORT_REPORT.txt in the output world before opening it in Minecraft.")
         def err(tb): self._set_busy(False); self._log(tb); QMessageBox.critical(self, "Conversion failed", tb)
         self.launch(work, done, err, self._log)
 
