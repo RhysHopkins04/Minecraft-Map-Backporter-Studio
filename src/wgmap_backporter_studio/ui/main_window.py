@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, __version__
 from ..core.catalog import load_catalog
-from ..core.jar_analyzer import analyze_jar, build_preview_spec, read_asset_bytes
+from ..core.jar_analyzer import analyze_jar, build_inventory_preview_spec, build_preview_spec, read_asset_bytes
 from ..core.legacy1710_engine import run_conversion, run_conversion_preflight
 from ..core.modpack_analyzer import analyze_modpack
 from ..core.version_targets import TARGETS
@@ -85,6 +85,70 @@ def _preview_images(jar_path: str, paths: list[str]) -> dict[str, QImage]:
     except Exception:
         pass
     return loaded
+
+
+
+def _render_inventory_preview(jar_path: str, candidate, size: int = 280) -> tuple[QPixmap, str]:
+    """Render only the candidate's proven packaged inventory/item icon.
+
+    This intentionally does not render block geometry, OBJ models, TESRs/BERs,
+    or substitute block/model textures. The inventory preview is a human-facing
+    inspection aid and has no influence on conversion mappings.
+    """
+    spec = build_inventory_preview_spec(jar_path, candidate)
+    canvas = QPixmap(size, size)
+    canvas.fill(QColor("#0b0f14"))
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+
+    icon_path = str(spec.get("icon_path") or "")
+    image = None
+    if icon_path:
+        image = _preview_images(jar_path, [icon_path]).get(icon_path)
+
+    if image is not None and not image.isNull():
+        max_w = size - 72
+        max_h = size - 104
+        # Keep pixel art crisp. Prefer an integer enlargement for the small
+        # 16/32px sprites common to 1.7.10, while still fitting unusual icons.
+        if image.width() <= max_w and image.height() <= max_h:
+            integer_scale = max(1, min(max_w // max(1, image.width()), max_h // max(1, image.height())))
+            target_w = float(image.width() * integer_scale)
+            target_h = float(image.height() * integer_scale)
+        else:
+            scale = min(max_w / max(1, image.width()), max_h / max(1, image.height()))
+            target_w = max(1.0, image.width() * scale)
+            target_h = max(1.0, image.height() * scale)
+        target = QRectF((size - target_w) / 2.0, 28.0 + (max_h - target_h) / 2.0, target_w, target_h)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+        painter.drawImage(target, image, QRectF(image.rect()))
+    else:
+        painter.setPen(QColor("#9aa8b7"))
+        painter.drawText(
+            QRectF(24, 30, size - 48, size - 86),
+            Qt.AlignCenter | Qt.TextWordWrap,
+            "No confidently associated packaged\nitem / inventory icon",
+        )
+
+    painter.setPen(QColor("#d8dee9"))
+    label = str(spec.get("registry") or "")
+    if label:
+        painter.drawText(10, size - 12, label[:54])
+    painter.end()
+
+    detail = str(spec.get("note") or "Inventory preview")
+    if icon_path:
+        detail += f"\nSource: {spec.get('icon_source') or 'packaged item texture'} ({spec.get('confidence') or 'unknown'} confidence)"
+        detail += f"\nIdentity: {spec.get('identity_basis') or 'exact candidate identity'}"
+        if spec.get("item_model_path"):
+            detail += f"\nItem model: {spec['item_model_path']}"
+        detail += f"\nIcon: {icon_path}"
+    else:
+        tokens = [str(x) for x in (spec.get("identity_tokens") or []) if str(x)]
+        if tokens:
+            detail += "\nExact identities checked: " + ", ".join(tokens[:8])
+    detail += "\nPreview assets never affect conversion mapping."
+    return canvas, detail
 
 
 def _project_raw(point) -> tuple[float, float]:
@@ -600,7 +664,7 @@ class DashboardTab(QWidget):
         cards = QGridLayout()
         items = [
             ("Map Backporter", "Convert modern Anvil regions into a validated older target format. The 1.7.10 Forge/HBM backend is available now."),
-            ("Mod / JAR Analyzer", "Inspect a mod JAR's block textures, blockstate/model assets, metadata and likely registry names without launching Minecraft."),
+            ("Mod / JAR Analyzer", "Inspect a mod JAR's registry/block evidence and preview confidently matched packaged inventory item icons without launching Minecraft."),
             ("Modpack Analyzer", "Inspect local modpack instances or ZIP exports and build a reusable target-block catalog from the JARs actually present."),
             ("Catalog Workspace", "Combine target catalogs and control which mod namespaces are eligible for reviewed safe Backporter mapping rules."),
         ]
@@ -1206,7 +1270,7 @@ class JarAnalyzerTab(AsyncTab):
         root = QVBoxLayout(self)
         root.addLayout(_title(
             "Mod / JAR Analyzer",
-            "Statically discover blocks and block/tile entities across legacy and modern mod JAR layouts, then preview packaged geometry without executing the mod."
+            "Statically discover blocks and block/tile entities across legacy and modern mod JAR layouts, then preview only confidently matched packaged inventory item icons without executing the mod."
         ))
         top = QHBoxLayout()
         self.jar = QLineEdit()
@@ -1232,19 +1296,15 @@ class JarAnalyzerTab(AsyncTab):
 
         side = QWidget()
         sl = QVBoxLayout(side)
-        preview_controls = QHBoxLayout()
-        preview_controls.addWidget(QLabel("Preview:"))
-        self.preview_mode = QComboBox()
-        self.preview_mode.addItem("Auto (reliable)", "auto")
-        self.preview_mode.addItem("3D model (experimental)", "model")
-        self.preview_mode.addItem("2D icon / texture", "2d")
-        self.preview_mode.setToolTip(
-            "Auto prefers faithful static geometry and falls back to a 2D icon/texture when a legacy model has ambiguous materials. "
-            "This affects only the analyzer preview, never conversion mapping."
+        preview_label = QLabel("Preview: Packaged item / inventory icon")
+        preview_label.setObjectName("muted")
+        preview_label.setToolTip(
+            "Shows only a confidently associated packaged inventory/item icon. "
+            "Block textures, OBJ/TESR/BER geometry, and fuzzy same-name assets are not substituted. "
+            "This preview never affects conversion mapping."
         )
-        preview_controls.addWidget(self.preview_mode, 1)
-        sl.addLayout(preview_controls)
-        self.preview = QLabel("Select a block or block entity to preview packaged static geometry.")
+        sl.addWidget(preview_label)
+        self.preview = QLabel("Select a block or block entity to preview its packaged inventory item icon.")
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumSize(250, 250)
         self.preview.setWordWrap(True)
@@ -1274,7 +1334,6 @@ class JarAnalyzerTab(AsyncTab):
         self.add_to_workspace.clicked.connect(self._add_to_workspace)
         self.export.clicked.connect(self._export)
         self.table.itemSelectionChanged.connect(self._preview_selected)
-        self.preview_mode.currentIndexChanged.connect(self._preview_selected)
 
     def _browse(self):
         p, _ = QFileDialog.getOpenFileName(
@@ -1344,7 +1403,7 @@ class JarAnalyzerTab(AsyncTab):
         self.add_to_workspace.setEnabled(True)
         self.export.setEnabled(True)
         self.preview.setPixmap(QPixmap())
-        self.preview.setText("Select a block or block entity to preview packaged static geometry.")
+        self.preview.setText("Select a block or block entity to preview its packaged inventory item icon.")
 
     def _preview_selected(self):
         if not self.catalog:
@@ -1371,14 +1430,13 @@ class JarAnalyzerTab(AsyncTab):
             return
 
         try:
-            mode = str(self.preview_mode.currentData() or "auto")
-            pixmap, detail = _render_static_preview(self.jar.text().strip(), candidate, preview_mode=mode)
+            pixmap, detail = _render_inventory_preview(self.jar.text().strip(), candidate)
             self.preview.setText("")
             self.preview.setPixmap(pixmap)
             self.preview.setToolTip(detail)
         except Exception as exc:
             self.preview.setPixmap(QPixmap())
-            self.preview.setText(f"Static preview unavailable:\n{exc}")
+            self.preview.setText(f"Inventory preview unavailable:\n{exc}")
 
     def _add_to_workspace(self):
         if self.catalog:

@@ -86,7 +86,7 @@ For a packaged functional test, analyse at least one Forge 1.7.10 mod that inclu
 - legacy OBJ/DAE/HMF/TCN model assets are counted and exact-name associations appear in the `Models` column;
 - confidence/evidence varies according to blockstate, class-file, model, texture, and localisation evidence instead of every legacy entry reporting `low`;
 - detected TileEntity subclasses are reported as analysis evidence without claiming that tile-entity rendering/model binding is fully implemented;
-- sorting the JAR Analyzer table does not make texture previews point at a different underlying candidate;
+- sorting the JAR Analyzer table does not make inventory-item previews point at a different underlying candidate;
 - manually resized analyzer columns remain user-selected until an actual window-width change requires contraction, and expanding the window restores the remembered preferred widths.
 
 For **Catalog Workspace**, load two or more individual mod catalog JSONs and at least one modpack analysis. Confirm that loading adds sources rather than replacing existing ones, each source has an independent checkbox, disabling a source removes its rows from the active count/view, `Remove selected` and `Clear all` behave as labelled, duplicate imports do not duplicate every row, and `Save workspace…` produces a JSON that can be loaded again with its enabled/disabled states preserved.
@@ -190,21 +190,16 @@ For the analyzer/provider work, verify all of the following before relying on a 
 - enum-backed block registries are discovered instead of collapsing to texture-only candidates;
 - modern Forge/NeoForge/Fabric/Quilt blockstate/model layouts remain discoverable;
 - packaged legacy `TileEntity` and modern `BlockEntity` subclasses are listed separately from blocks;
-- the right-hand preview uses packaged static JSON/OBJ/texture information and never executes a mod's custom renderer;
-- the right-hand preview exposes **Auto (reliable)**, **3D model (experimental)**, and **2D icon / texture** modes; changing preview mode must not mutate Catalog Workspace or conversion mapping state;
-- Auto mode uses 3D only when the static material/model binding is credible and may fall back to a 2D asset for ambiguous legacy OBJ/TESR content; manual 3D remains available for inspection;
-- exact registry-name item icons may be preferred for ordinary block rows, while block-entity rows must prefer model/block textures over ambiguous same-name item icons;
-- same-named model families in unrelated packages (for example machine vs weapon) are disambiguated using block-entity class/package context before texture binding;
-- legacy OBJ texture binding must not pull unrelated same-name inventory or unrelated directory atlases into one mesh;
-- Et Futurum-style backport blocks can link their registered `etfuturum:*` candidates to matching modern-vanilla textures packaged under `assets/minecraft`;
-- ordinary textured cubes show recognizable per-face pixel art rather than screen-space tiled/warped texture brushes;
-- two-block doors render both bottom and top halves using their corresponding textures;
-- vertical animated block textures preview frame 0 rather than being compressed into one face;
-- OBJ previews use packaged UV coordinates when present instead of painting one texture indiscriminately across the whole mesh;
-- Campfire Backport-style code-rendered campfires are represented by a synthesized crossed-log/fire preview rather than a full cube when their packaged texture family is discoverable;
-- dedicated textures under legacy `textures/models/...` paths are preferred for linked OBJ/DAE model geometry instead of unrelated block icons;
-- projected texture faces use affine image mapping rather than bounding-box clipping, so doors/campfires do not show diagonal slices of an unwarped square texture;
-- runtime-only tile/block entity renderers with no packaged static geometry are never invented as cubes: show a linked 2D texture/icon when one exists, otherwise report that the runtime renderer cannot be reconstructed statically;
+- the right-hand preview is **inventory-asset only**: it must not render JSON/OBJ/TESR/BER geometry or synthesize block shapes in the normal analyzer workflow;
+- legacy inventory sprites are accepted only from exact `assets/<namespace>/textures/items/...` or `textures/item/...` identities tied to the selected candidate;
+- modern generated item JSON may resolve an explicit packaged layer texture, but a parent block model alone is not treated as a pre-rendered inventory icon;
+- direct inventory-preview identity is registry-authoritative: only the selected block's exact namespaced registry basename may select a legacy item sprite or item-model JSON;
+- TileEntity/BlockEntity class names, display names, prefix-stripped names, and catalog/fuzzy aliases must not select an inventory sprite because unrelated items can legitimately share those shorter names;
+- broad substring/fuzzy matching across a large item texture directory is forbidden, so an unrelated HBM weapon/item cannot become the preview for a machine merely because it shares a word;
+- block/model textures under `textures/blocks`, `textures/models`, OBJ/DAE/HMF/TCN model assets, and runtime renderer data must never be substituted when a packaged inventory icon cannot be proven;
+- when no safe inventory icon exists, the pane explicitly reports **No confidently associated packaged item / inventory icon** rather than showing invented geometry or an arbitrary texture;
+- item/inventory preview selection is presentation-only and must not mutate Catalog Workspace, provider roles, preflight fingerprints, replacement rules, or conversion mapping state;
+- legacy/modern model discovery remains available as catalog evidence even though those models are no longer rendered in the user-facing preview pane;
 - HBM remains an architectural fallback rather than receiving automatic exact-name mapping authority;
 - recognized backport-provider catalogs are carried separately in the active workspace snapshot;
 - an exact provider target is selected only when the target world registry actually contains it;

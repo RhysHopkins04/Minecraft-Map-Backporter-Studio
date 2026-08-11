@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from wgmap_backporter_studio.core.jar_analyzer import analyze_jar, build_preview_spec
+from wgmap_backporter_studio.core.jar_analyzer import analyze_jar, build_inventory_preview_spec, build_preview_spec
 from wgmap_backporter_studio.core.modpack_analyzer import analyze_modpack
 from wgmap_backporter_studio.core.version_targets import TARGET_BY_VERSION
 from wgmap_backporter_studio.core.mapping_profiles import profile_from_catalog_snapshot
@@ -434,6 +434,80 @@ def test_preview_mode_asset_selection_and_legacy_model_disambiguation():
         assert block["auto_preview_mode"] == "model"
 
 
+
+def test_inventory_item_preview_is_strict_and_model_independent():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        jar = td / "inventory-preview.jar"
+        png = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360f8cfc0000004010100c9fe92ef0000000049454e44ae426082")
+        with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as z:
+            # Exact registered-block sprite plus a deliberately tempting but
+            # unrelated shorter-name item. The latter must never win.
+            z.writestr("assets/demo/textures/items/machine_crucible.png", png)
+            z.writestr("assets/demo/textures/items/crucible.png", png)
+            z.writestr("assets/demo/textures/models/machines/crucible_heat.png", png)
+            z.writestr("assets/demo/textures/blocks/charger.png", png)
+            # Modern generated item model whose explicit layer0 is safe.
+            z.writestr("assets/demo/models/item/widget.json", json.dumps({
+                "parent": "item/generated",
+                "textures": {"layer0": "demo:item/widget_icon"},
+            }))
+            z.writestr("assets/demo/textures/item/widget_icon.png", png)
+
+        block = build_inventory_preview_spec(jar, {
+            "namespace": "demo",
+            "source_mod": "demo",
+            "candidate_kind": "registered block candidate",
+            "registry_hint": "demo:machine_crucible",
+            "display_name": "Crucible",
+            "texture_paths": ["assets/demo/textures/models/machines/crucible_heat.png"],
+            "model_paths": ["assets/demo/models/machines/crucible.obj"],
+        })
+        assert block["kind"] == "inventory_icon"
+        assert block["icon_path"] == "assets/demo/textures/items/machine_crucible.png"
+        assert block["icon_source"] == "packaged item texture"
+        assert block["identity_basis"] == "exact registered block name"
+
+        tile = build_inventory_preview_spec(jar, {
+            "namespace": "demo",
+            "source_mod": "demo",
+            "candidate_kind": "block entity",
+            "class_name": "demo.machine.TileEntityCrucible",
+            "display_name": "Crucible",
+            "texture_paths": ["assets/demo/textures/models/machines/crucible_heat.png"],
+            "model_paths": ["assets/demo/models/machines/crucible.obj"],
+        })
+        assert tile["kind"] == "inventory_unavailable"
+        assert tile["icon_path"] == ""
+        assert "class/display-name matches" in tile["note"]
+
+        unavailable = build_inventory_preview_spec(jar, {
+            "namespace": "demo",
+            "source_mod": "demo",
+            "candidate_kind": "registered block candidate",
+            "registry_hint": "demo:charger",
+            "display_name": "Charger",
+            "texture_paths": ["assets/demo/textures/blocks/charger.png"],
+            "model_paths": ["assets/demo/models/machines/charger.obj"],
+        })
+        assert unavailable["kind"] == "inventory_unavailable"
+        assert unavailable["icon_path"] == ""
+        assert "will not substitute block textures" in unavailable["note"]
+
+        modern = build_inventory_preview_spec(jar, {
+            "namespace": "demo",
+            "source_mod": "demo",
+            "candidate_kind": "registered block candidate",
+            "registry_hint": "demo:widget",
+            "display_name": "Widget",
+        })
+        assert modern["kind"] == "inventory_icon"
+        assert modern["icon_path"] == "assets/demo/textures/item/widget_icon.png"
+        assert modern["icon_source"] == "item-model layer texture"
+        assert modern["item_model_path"] == "assets/demo/models/item/widget.json"
+
+
+
 def test_runtime_only_preview_is_not_invented_as_cube():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
@@ -620,6 +694,7 @@ def main():
     test_backport_provider_mapping_profile()
     test_legacy_directional_metadata_and_provider_registry_diagnostics()
     test_preview_mode_asset_selection_and_legacy_model_disambiguation()
+    test_inventory_item_preview_is_strict_and_model_independent()
     test_runtime_only_preview_is_not_invented_as_cube()
     test_content_audit_and_legacy_roundtrip()
     test_cross_generation_jar_analysis_and_preview()

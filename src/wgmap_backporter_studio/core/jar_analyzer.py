@@ -16,6 +16,8 @@ from .catalog import BlockAsset, BlockEntityAsset, ModCatalog
 
 _TEXTURE_RE = re.compile(r"^assets/([^/]+)/textures/(?:block|blocks)/(.+)\.png$", re.I)
 _ANY_TEXTURE_RE = re.compile(r"^assets/([^/]+)/textures/(.+)\.png$", re.I)
+_ITEM_TEXTURE_RE = re.compile(r"^assets/([^/]+)/textures/(?:item|items)/(.+)\.png$", re.I)
+_ITEM_MODEL_RE = re.compile(r"^assets/([^/]+)/models/(?:item|items)/(.+)\.json$", re.I)
 _MODEL_RE = re.compile(r"^assets/([^/]+)/models/(?:block|blocks)/(.+)\.json$", re.I)
 _ANY_MODEL_RE = re.compile(r"^assets/([^/]+)/models/(.+)\.(json|obj|dae|hmf|tcn)$", re.I)
 _BLOCKSTATE_RE = re.compile(r"^assets/([^/]+)/blockstates/(.+)\.json$", re.I)
@@ -711,6 +713,178 @@ def _preview_2d_asset(
         confidence = 'low'
     return path, label, confidence
 
+
+def _inventory_asset_token(value: str) -> str:
+    """Normalize one registry/class/display token for exact inventory-asset matching."""
+    value = value.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
+    value = _camel_to_snake(value)
+    return re.sub(r"[^a-z0-9_]+", "_", value).strip("_")
+
+
+def _inventory_identity_tokens(data: dict[str, Any]) -> list[tuple[str, int, str]]:
+    """Return only registry-proven inventory identity tokens.
+
+    The normal analyzer preview deliberately refuses class/display/fuzzy aliases.
+    A TileEntity name such as ``Crucible`` can collide with an unrelated item
+    sprite named ``crucible.png`` (HBM contains exactly this sort of case).
+    Therefore a direct inventory sprite/model is eligible only when the selected
+    block candidate exposes a stable namespaced registry hint.
+    """
+    registry = str(data.get("registry_hint") or "")
+    if ":" not in registry:
+        return []
+    _namespace, registry_rel = registry.split(":", 1)
+    token = _inventory_asset_token(registry_rel)
+    if not token:
+        return []
+    return [(token, 1000, "exact registered block name")]
+
+
+def _resolve_item_model_texture(
+    zf: zipfile.ZipFile,
+    item_model_path: str,
+    names: set[str],
+) -> tuple[str, str]:
+    """Resolve a modern generated item model to its packaged layer texture.
+
+    Only explicit item-model texture references are accepted. A parent that
+    merely points at a block model is not treated as a pre-rendered inventory
+    icon because doing so would reintroduce the unreliable 3D reconstruction
+    this preview path is intentionally avoiding.
+    """
+    resolved = _resolve_json_model(zf, item_model_path)
+    textures = resolved.get("textures") if isinstance(resolved, dict) else None
+    if not isinstance(textures, dict):
+        return "", ""
+
+    def resolve_value(key: str) -> str:
+        value = textures.get(key)
+        seen: set[str] = set()
+        while isinstance(value, str) and value.startswith("#") and value[1:] not in seen:
+            seen.add(value[1:])
+            value = textures.get(value[1:])
+        return str(value) if isinstance(value, str) and value and not value.startswith("#") else ""
+
+    ordered_keys = ["layer0", "texture", "all"] + [str(k) for k in textures if str(k) not in {"layer0", "texture", "all", "particle"}]
+    default_ns = item_model_path.split("/", 2)[1] if item_model_path.startswith("assets/") else "minecraft"
+    for key in ordered_keys:
+        value = resolve_value(key)
+        if not value:
+            continue
+        if ":" in value:
+            ns, rel = value.split(":", 1)
+        else:
+            ns, rel = default_ns, value
+        texture_path = f"assets/{ns}/textures/{rel}.png"
+        if texture_path in names:
+            return texture_path, key
+    return "", ""
+
+
+def build_inventory_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
+    """Resolve one *packaged inventory representation* without rendering models.
+
+    This is the user-facing analyzer preview path. It deliberately ignores OBJ,
+    TESR/BER geometry, block textures, and model atlases. Legacy JARs may expose
+    a direct ``textures/items`` sprite; modern JARs may expose a generated item
+    JSON whose explicit layer texture is safe to show. If neither can be tied
+    to the selected candidate by an exact identity token, the result is
+    unavailable rather than guessed.
+
+    Conversion mapping never consumes this result.
+    """
+    if hasattr(candidate, "__dict__"):
+        data = dict(candidate.__dict__)
+    elif isinstance(candidate, dict):
+        data = dict(candidate)
+    else:
+        raise TypeError("preview candidate must be a catalog asset")
+
+    registry = str(data.get("registry_hint") or data.get("class_name") or "")
+    namespace = str(data.get("namespace") or (registry.split(":", 1)[0] if ":" in registry else "minecraft"))
+    source_mod = str(data.get("source_mod") or namespace).lower()
+    identity_tokens = _inventory_identity_tokens(data)
+    token_scores = {token: (score, basis) for token, score, basis in identity_tokens}
+
+    allowed_namespaces = [namespace]
+    if source_mod in _KNOWN_BACKPORT_IDS or namespace.lower() in _KNOWN_BACKPORT_IDS:
+        # Backport mods sometimes intentionally place Mojang-owned inventory
+        # assets under assets/minecraft while registering under their own modid.
+        if "minecraft" not in allowed_namespaces:
+            allowed_namespaces.append("minecraft")
+
+    with zipfile.ZipFile(jar_path, "r") as zf:
+        names = set(zf.namelist())
+        candidates: list[tuple[int, str, str, str, str]] = []
+
+        # Legacy and modern direct item textures. Match the complete relative
+        # basename token only; never substring/fuzzy-match the 2,000+ unrelated
+        # sprites common in large 1.7.10 mods such as HBM.
+        for path in names:
+            match = _ITEM_TEXTURE_RE.match(path)
+            if not match or match.group(1) not in allowed_namespaces:
+                continue
+            rel_token = _inventory_asset_token(match.group(2))
+            identity = token_scores.get(rel_token)
+            if identity is None:
+                continue
+            identity_score, basis = identity
+            ns_bonus = 80 if match.group(1) == namespace else 20
+            candidates.append((identity_score + ns_bonus + 100, path, "packaged item texture", basis, ""))
+
+        # Modern item model JSON can safely point at a generated layer sprite.
+        # The model itself is not rendered here.
+        for path in names:
+            match = _ITEM_MODEL_RE.match(path)
+            if not match or match.group(1) not in allowed_namespaces:
+                continue
+            rel_token = _inventory_asset_token(match.group(2))
+            identity = token_scores.get(rel_token)
+            if identity is None:
+                continue
+            texture_path, layer = _resolve_item_model_texture(zf, path, names)
+            if not texture_path:
+                continue
+            identity_score, basis = identity
+            ns_bonus = 80 if match.group(1) == namespace else 20
+            candidates.append((identity_score + ns_bonus + 60, texture_path, "item-model layer texture", basis, path))
+
+    if not candidates:
+        tried = ", ".join(token for token, _score, _basis in identity_tokens[:6]) or "no stable identity token"
+        return {
+            "kind": "inventory_unavailable",
+            "registry": registry,
+            "icon_path": "",
+            "icon_source": "",
+            "item_model_path": "",
+            "confidence": "none",
+            "identity_basis": "",
+            "identity_tokens": [token for token, _score, _basis in identity_tokens],
+            "note": (
+                "No confidently associated packaged item/inventory icon was found. "
+                "The analyzer will not substitute block textures, OBJ/TESR model textures, class/display-name matches, or fuzzy same-name assets. "
+                f"Registered inventory identity checked: {tried}."
+            ),
+        }
+
+    score, icon_path, source, basis, item_model_path = sorted(candidates, key=lambda row: (-row[0], row[1]))[0]
+    confidence = "high" if score >= 1050 else "medium"
+    return {
+        "kind": "inventory_icon",
+        "registry": registry,
+        "icon_path": icon_path,
+        "icon_source": source,
+        "item_model_path": item_model_path,
+        "confidence": confidence,
+        "identity_basis": basis,
+        "identity_tokens": [token for token, _score, _basis in identity_tokens],
+        "note": (
+            "Packaged inventory/item preview selected by exact candidate identity. "
+            "This visual preview is presentation-only and is never used as conversion mapping evidence."
+        ),
+    }
+
+
 def _infer_model_kind(rel: str, model_paths: list[str], blockstate_path: str) -> str:
     token = _camel_to_snake(rel).lower()
     if "campfire" in token:
@@ -1102,7 +1276,7 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
     )
     notes.append("Display names prefer en_US, then other English locales, then non-English translations only as a final fallback.")
     notes.append(
-        "The desktop preview uses texture-aware JSON geometry, UV-aware OBJ geometry, cross-namespace backport textures, and shape-aware legacy renderer approximations. Runtime TESRs/BERs and arbitrary mod code are never executed by the analyzer."
+        "The desktop analyzer preview shows only confidently associated packaged inventory/item icons (legacy textures/items or explicit modern item-model layer textures). It does not render OBJ/TESR/BER geometry or substitute block/model textures when an inventory icon cannot be proven."
     )
     if provider_role == "backport_provider":
         notes.append("This catalog is classified as a backport provider. Exact same-name registered blocks can outrank approximate HBM/vanilla fallbacks when the target world registry confirms that block is actually enabled.")

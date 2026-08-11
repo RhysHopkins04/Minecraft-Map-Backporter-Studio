@@ -407,6 +407,10 @@ for token in [
     'assert machine["model_path"].endswith("models/machines/crucible.obj")',
     'assert machine["render_texture_paths"] == ["assets/demo/textures/models/machines/crucible_heat.png"]',
     'assert block["preview_2d_kind"] == "item icon"',
+    'def test_inventory_item_preview_is_strict_and_model_independent():',
+    'assert block["icon_path"] == "assets/demo/textures/items/machine_crucible.png"',
+    'assert unavailable["kind"] == "inventory_unavailable"',
+    'assert modern["icon_source"] == "item-model layer texture"',
     'def test_runtime_only_preview_is_not_invented_as_cube():',
     'assert card["kind"] == "texture_card"',
     'assert unresolved["kind"] == "runtime_unresolved"',
@@ -557,6 +561,11 @@ for token in [
     'packaged TileEntity/BlockEntity subclass',
     'class BlockEntityAsset',
     '_ANY_MODEL_RE = re.compile',
+    'def build_inventory_preview_spec(',
+    '_ITEM_TEXTURE_RE = re.compile',
+    '_ITEM_MODEL_RE = re.compile',
+    'No confidently associated packaged item/inventory icon was found.',
+    'will not substitute block textures, OBJ/TESR model textures, class/display-name matches, or fuzzy same-name assets',
     'def build_preview_spec(',
     'Texture-aware static JSON model preview',
     'UV-mapped static OBJ geometry preview',
@@ -581,28 +590,28 @@ for token in [
 
 for token in [
     'def _preview_images(',
-    'self.preview_mode.addItem("Auto (reliable)", "auto")',
-    'self.preview_mode.addItem("3D model (experimental)", "model")',
-    'self.preview_mode.addItem("2D icon / texture", "2d")',
-    'preview_mode: str = "auto"',
-    'effective_mode == "2d"',
+    'def _render_inventory_preview(',
+    'build_inventory_preview_spec(jar_path, candidate)',
+    'Preview: Packaged item / inventory icon',
+    'No confidently associated packaged\\nitem / inventory icon',
+    'pixmap, detail = _render_inventory_preview(self.jar.text().strip(), candidate)',
+    'Preview assets never affect conversion mapping.',
     'image.convertToFormat(QImage.Format.Format_RGBA8888)',
     'path + ".mcmeta" in names',
-    'def _affine_coefficients(',
-    'def _draw_affine_image_triangle(',
-    'QTransform(*coeffs)',
-    'def _draw_textured_quad(',
-    'def _draw_uv_triangle(',
-    'elif kind == "door":',
-    'elif kind == "campfire":',
-    'elif kind == "lantern":',
-    'elif kind == "texture_card":',
-    'message = "Runtime renderer\\nnot statically reconstructable"',
     'provider targets registered',
     'catalog backport target(s) are actually registered in the selected template',
 ]:
     if token not in main_window:
-        error(f"Analyzer preview reliability invariant missing: {token}")
+        error(f"Analyzer inventory-preview invariant missing: {token}")
+
+for forbidden in [
+    'self.preview_mode.addItem("Auto (reliable)", "auto")',
+    'self.preview_mode.addItem("3D model (experimental)", "model")',
+    'self.preview_mode.addItem("2D icon / texture", "2d")',
+    'self.preview_mode.currentIndexChanged.connect(self._preview_selected)',
+]:
+    if forbidden in main_window:
+        error(f"Retired analyzer preview-mode UI still present: {forbidden}")
 
 
 catalog_model_path = root / "src/wgmap_backporter_studio/core/catalog.py"
@@ -645,7 +654,7 @@ for token in [
     'def _active_rows(self) -> list[dict]:',
     '"kind": "catalog_workspace"',
     'item.setData(Qt.UserRole, ("block" if kind == "Block" else "block_entity", source_index))',
-    'pixmap, detail = _render_static_preview(self.jar.text().strip(), candidate, preview_mode=mode)',
+    'pixmap, detail = _render_inventory_preview(self.jar.text().strip(), candidate)',
 ]:
     if token not in main_window:
         error(f"Multi-catalog/analyzer interaction invariant missing: {token}")
