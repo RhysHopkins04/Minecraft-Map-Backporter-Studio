@@ -383,6 +383,57 @@ def test_legacy_directional_metadata_and_provider_registry_diagnostics():
     assert any("has no registered blocks" in line for line in logs)
 
 
+def test_preview_mode_asset_selection_and_legacy_model_disambiguation():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        jar = td / "preview-assets.jar"
+        png = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360f8cfc0000004010100c9fe92ef0000000049454e44ae426082")
+        obj = "\n".join([
+            "v 0 0 0", "v 1 0 0", "v 0 1 0",
+            "vt 0 0", "vt 1 0", "vt 0 1",
+            "f 1/1 2/2 3/3",
+        ])
+        with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("assets/demo/models/machines/crucible.obj", obj)
+            z.writestr("assets/demo/models/weapons/crucible.obj", obj)
+            z.writestr("assets/demo/textures/models/machines/crucible_heat.png", png)
+            z.writestr("assets/demo/textures/items/crucible.png", png)
+            z.writestr("assets/demo/textures/blocks/widget.png", png)
+            z.writestr("assets/demo/textures/items/widget.png", png)
+
+        machine = build_preview_spec(jar, {
+            "namespace": "demo",
+            "candidate_kind": "block entity",
+            "class_name": "demo.machine.TileEntityCrucible",
+            "display_name": "Crucible",
+            "texture_paths": [
+                "assets/demo/textures/models/machines/crucible_heat.png",
+                "assets/demo/textures/items/crucible.png",
+            ],
+            "model_paths": [
+                "assets/demo/models/machines/crucible.obj",
+                "assets/demo/models/weapons/crucible.obj",
+            ],
+        })
+        assert machine["model_path"].endswith("models/machines/crucible.obj")
+        assert machine["render_texture_paths"] == ["assets/demo/textures/models/machines/crucible_heat.png"]
+        assert machine["preview_2d_path"].endswith("textures/models/machines/crucible_heat.png")
+        assert machine["preview_2d_kind"] == "model texture"
+
+        block = build_preview_spec(jar, {
+            "namespace": "demo",
+            "candidate_kind": "registered block candidate",
+            "registry_hint": "demo:widget",
+            "display_name": "Widget",
+            "texture_paths": ["assets/demo/textures/blocks/widget.png"],
+            "model_paths": [],
+            "model_kind": "cube",
+        })
+        assert block["preview_2d_path"].endswith("textures/items/widget.png")
+        assert block["preview_2d_kind"] == "item icon"
+        assert block["auto_preview_mode"] == "model"
+
+
 def test_runtime_only_preview_is_not_invented_as_cube():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
@@ -568,6 +619,7 @@ def main():
     test_catalog_bound_mapping_profile()
     test_backport_provider_mapping_profile()
     test_legacy_directional_metadata_and_provider_registry_diagnostics()
+    test_preview_mode_asset_selection_and_legacy_model_disambiguation()
     test_runtime_only_preview_is_not_invented_as_cube()
     test_content_audit_and_legacy_roundtrip()
     test_cross_generation_jar_analysis_and_preview()

@@ -270,15 +270,24 @@ def _preview_scene_vertices(kind: str, elements, obj_vertices) -> list[tuple[flo
     return [(0,0,0),(16,16,16)]
 
 
-def _render_static_preview(jar_path: str, candidate, size: int = 280) -> tuple[QPixmap, str]:
+def _render_static_preview(jar_path: str, candidate, size: int = 280, preview_mode: str = "auto") -> tuple[QPixmap, str]:
     spec = build_preview_spec(jar_path, candidate)
     canvas = QPixmap(size, size)
     canvas.fill(QColor("#0b0f14"))
     painter = QPainter(canvas)
     painter.setRenderHint(QPainter.Antialiasing, True)
 
-    texture_paths = list(spec.get("texture_paths") or [])
-    images = _preview_images(jar_path, texture_paths)
+    requested_mode = preview_mode if preview_mode in {"auto", "model", "2d"} else "auto"
+    effective_mode = str(spec.get("auto_preview_mode") or "model") if requested_mode == "auto" else requested_mode
+    preview_2d_path = str(spec.get("preview_2d_path") or "")
+    if effective_mode == "2d" and not preview_2d_path:
+        effective_mode = "model"
+
+    texture_paths = list(spec.get("render_texture_paths") or spec.get("texture_paths") or [])
+    load_paths = list(texture_paths)
+    if preview_2d_path and preview_2d_path not in load_paths:
+        load_paths.append(preview_2d_path)
+    images = _preview_images(jar_path, load_paths)
     roles = dict(spec.get("texture_roles") or {})
     kind = str(spec.get("kind") or "asset")
     elements = list(spec.get("elements") or [])
@@ -298,7 +307,24 @@ def _render_static_preview(jar_path: str, candidate, size: int = 280) -> tuple[Q
     scene_vertices = _preview_scene_vertices(kind, elements, normalized_obj)
     transform = _fit_iso_projection(scene_vertices, size)
 
-    if kind in {"asset","runtime_unresolved"} and not images and not spec.get("model_path"):
+    if effective_mode == "2d" and preview_2d_path:
+        image = images.get(preview_2d_path)
+        if image is not None and not image.isNull():
+            # Preserve pixel art and aspect ratio; never stretch a rectangular
+            # atlas/icon into a square. This is intentionally a truthful 2D
+            # asset view, not invented block geometry.
+            max_w = size - 72
+            max_h = size - 104
+            scale = min(max_w / max(1, image.width()), max_h / max(1, image.height()))
+            target_w = max(1.0, image.width() * scale)
+            target_h = max(1.0, image.height() * scale)
+            target = QRectF((size-target_w)/2.0, 28.0 + (max_h-target_h)/2.0, target_w, target_h)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+            painter.drawImage(target, image, QRectF(image.rect()))
+        else:
+            painter.setPen(QColor("#9aa8b7"))
+            painter.drawText(canvas.rect(), Qt.AlignCenter, "2D icon/texture\nunavailable")
+    elif kind in {"asset","runtime_unresolved"} and not images and not spec.get("model_path"):
         painter.setPen(QColor("#9aa8b7"))
         message = "Runtime renderer\nnot statically reconstructable" if kind == "runtime_unresolved" else "No packaged static model\nor texture linked"
         painter.drawText(canvas.rect(), Qt.AlignCenter, message)
@@ -425,11 +451,19 @@ def _render_static_preview(jar_path: str, candidate, size: int = 280) -> tuple[Q
     if label:
         painter.drawText(10, size - 12, label[:54])
     painter.end()
+    fidelity = str(spec.get("preview_fidelity") or "unknown")
     detail = str(spec.get("note") or "Static asset preview")
-    if spec.get("model_path"):
+    detail += f"\nPreview mode: {effective_mode} (requested {requested_mode}); fidelity: {fidelity}"
+    if effective_mode == "2d" and preview_2d_path:
+        detail += f"\n2D source: {spec.get('preview_2d_kind') or 'texture'} ({spec.get('preview_2d_confidence') or 'unknown'} confidence)"
+        detail += f"\n{preview_2d_path}"
+    elif spec.get("model_path"):
         detail += f"\n{spec['model_path']}"
     if texture_paths:
-        detail += f"\n{len(texture_paths)} linked texture(s)"
+        detail += f"\n{len(texture_paths)} render texture(s)"
+    warnings = [str(x) for x in (spec.get("preview_warnings") or []) if str(x)]
+    if warnings:
+        detail += "\nWarnings: " + "; ".join(warnings)
     return canvas, detail
 
 
@@ -1198,6 +1232,18 @@ class JarAnalyzerTab(AsyncTab):
 
         side = QWidget()
         sl = QVBoxLayout(side)
+        preview_controls = QHBoxLayout()
+        preview_controls.addWidget(QLabel("Preview:"))
+        self.preview_mode = QComboBox()
+        self.preview_mode.addItem("Auto (reliable)", "auto")
+        self.preview_mode.addItem("3D model (experimental)", "model")
+        self.preview_mode.addItem("2D icon / texture", "2d")
+        self.preview_mode.setToolTip(
+            "Auto prefers faithful static geometry and falls back to a 2D icon/texture when a legacy model has ambiguous materials. "
+            "This affects only the analyzer preview, never conversion mapping."
+        )
+        preview_controls.addWidget(self.preview_mode, 1)
+        sl.addLayout(preview_controls)
         self.preview = QLabel("Select a block or block entity to preview packaged static geometry.")
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumSize(250, 250)
@@ -1228,6 +1274,7 @@ class JarAnalyzerTab(AsyncTab):
         self.add_to_workspace.clicked.connect(self._add_to_workspace)
         self.export.clicked.connect(self._export)
         self.table.itemSelectionChanged.connect(self._preview_selected)
+        self.preview_mode.currentIndexChanged.connect(self._preview_selected)
 
     def _browse(self):
         p, _ = QFileDialog.getOpenFileName(
@@ -1324,7 +1371,8 @@ class JarAnalyzerTab(AsyncTab):
             return
 
         try:
-            pixmap, detail = _render_static_preview(self.jar.text().strip(), candidate)
+            mode = str(self.preview_mode.currentData() or "auto")
+            pixmap, detail = _render_static_preview(self.jar.text().strip(), candidate, preview_mode=mode)
             self.preview.setText("")
             self.preview.setPixmap(pixmap)
             self.preview.setToolTip(detail)

@@ -191,6 +191,11 @@ For the analyzer/provider work, verify all of the following before relying on a 
 - modern Forge/NeoForge/Fabric/Quilt blockstate/model layouts remain discoverable;
 - packaged legacy `TileEntity` and modern `BlockEntity` subclasses are listed separately from blocks;
 - the right-hand preview uses packaged static JSON/OBJ/texture information and never executes a mod's custom renderer;
+- the right-hand preview exposes **Auto (reliable)**, **3D model (experimental)**, and **2D icon / texture** modes; changing preview mode must not mutate Catalog Workspace or conversion mapping state;
+- Auto mode uses 3D only when the static material/model binding is credible and may fall back to a 2D asset for ambiguous legacy OBJ/TESR content; manual 3D remains available for inspection;
+- exact registry-name item icons may be preferred for ordinary block rows, while block-entity rows must prefer model/block textures over ambiguous same-name item icons;
+- same-named model families in unrelated packages (for example machine vs weapon) are disambiguated using block-entity class/package context before texture binding;
+- legacy OBJ texture binding must not pull unrelated same-name inventory or unrelated directory atlases into one mesh;
 - Et Futurum-style backport blocks can link their registered `etfuturum:*` candidates to matching modern-vanilla textures packaged under `assets/minecraft`;
 - ordinary textured cubes show recognizable per-face pixel art rather than screen-space tiled/warped texture brushes;
 - two-block doors render both bottom and top halves using their corresponding textures;

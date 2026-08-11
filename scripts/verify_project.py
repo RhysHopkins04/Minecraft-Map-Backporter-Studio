@@ -403,6 +403,10 @@ for token in [
     'assert be_spec["kind"] == "obj"',
     'assert be_spec["texture_paths"][0] == "assets/etfuturum/textures/models/trinkets/fancy_sign.png"',
     'assert "UV-mapped" in be_spec["note"]',
+    'def test_preview_mode_asset_selection_and_legacy_model_disambiguation():',
+    'assert machine["model_path"].endswith("models/machines/crucible.obj")',
+    'assert machine["render_texture_paths"] == ["assets/demo/textures/models/machines/crucible_heat.png"]',
+    'assert block["preview_2d_kind"] == "item icon"',
     'def test_runtime_only_preview_is_not_invented_as_cube():',
     'assert card["kind"] == "texture_card"',
     'assert unresolved["kind"] == "runtime_unresolved"',
@@ -558,11 +562,14 @@ for token in [
     'UV-mapped static OBJ geometry preview',
     'def _associate_preview_textures(',
     'def _associate_model_textures(',
+    'def _select_block_entity_models(',
+    'def _preview_2d_asset(',
+    'same-named inventory icon',
     'textures/models/',
     'assets/minecraft',
     'Synthesized full two-block door preview',
     'Synthesized campfire preview',
-    'shape = "texture_card" if textures else "runtime_unresolved"',
+    'shape = "texture_card" if all_linked_textures else "runtime_unresolved"',
     'shape == "runtime_unresolved"',
     'backport_provider',
     'architectural_fallback',
@@ -574,6 +581,11 @@ for token in [
 
 for token in [
     'def _preview_images(',
+    'self.preview_mode.addItem("Auto (reliable)", "auto")',
+    'self.preview_mode.addItem("3D model (experimental)", "model")',
+    'self.preview_mode.addItem("2D icon / texture", "2d")',
+    'preview_mode: str = "auto"',
+    'effective_mode == "2d"',
     'image.convertToFormat(QImage.Format.Format_RGBA8888)',
     'path + ".mcmeta" in names',
     'def _affine_coefficients(',
@@ -590,7 +602,7 @@ for token in [
     'catalog backport target(s) are actually registered in the selected template',
 ]:
     if token not in main_window:
-        error(f"Patch 017 faithful static preview invariant missing: {token}")
+        error(f"Analyzer preview reliability invariant missing: {token}")
 
 
 catalog_model_path = root / "src/wgmap_backporter_studio/core/catalog.py"
@@ -633,7 +645,7 @@ for token in [
     'def _active_rows(self) -> list[dict]:',
     '"kind": "catalog_workspace"',
     'item.setData(Qt.UserRole, ("block" if kind == "Block" else "block_entity", source_index))',
-    'pixmap, detail = _render_static_preview(self.jar.text().strip(), candidate)',
+    'pixmap, detail = _render_static_preview(self.jar.text().strip(), candidate, preview_mode=mode)',
 ]:
     if token not in main_window:
         error(f"Multi-catalog/analyzer interaction invariant missing: {token}")

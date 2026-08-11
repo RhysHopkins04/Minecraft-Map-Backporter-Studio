@@ -556,10 +556,14 @@ def _associate_model_textures(model_paths: Iterable[str], texture_paths: Iterabl
         if len(out) > before:
             continue
 
-        # Bounded same-namespace fallback. Prefer exact basename and then a
-        # shared directory suffix; never cross namespaces for custom models.
+        # Bounded same-namespace fallback. Prefer textures/models assets in the
+        # same model family. A same-named inventory icon is *not* automatically
+        # the texture used by an OBJ/TESR (HBM's machine and weapon "crucible"
+        # are the motivating collision), so item textures receive a large
+        # penalty during model-texture binding.
         scored: list[tuple[int, str]] = []
         model_words = set(_preview_words(rel))
+        model_dir = rel.rsplit('/', 1)[0] if '/' in rel else ''
         for texture_path in textures:
             tm = _ANY_TEXTURE_RE.match(texture_path)
             if not tm or tm.group(1) != ns:
@@ -567,18 +571,145 @@ def _associate_model_textures(model_paths: Iterable[str], texture_paths: Iterabl
             texture_rel = tm.group(2)
             texture_stem = PurePosixPath(texture_rel).name
             score = 0
-            if _camel_to_snake(texture_stem) == _camel_to_snake(stem):
-                score += 100
+            exact_stem = _camel_to_snake(texture_stem) == _camel_to_snake(stem)
             shared = model_words & set(_preview_words(texture_rel))
+            # A shared basename token by itself is also too weak when the
+            # asset lives in another feature family (machine crucible vs weapon
+            # crucible). Require either an exact basename or directory-family
+            # agreement before fuzzy token overlap can contribute.
+            same_dir = bool(model_dir and model_dir in texture_rel)
+            if not exact_stem and not (same_dir and shared):
+                continue
+            if exact_stem:
+                score += 100
             score += len(shared) * 8
-            if rel.rsplit('/', 1)[0] and rel.rsplit('/', 1)[0] in texture_rel:
-                score += 20
+            if same_dir:
+                score += 44
+            if texture_rel.startswith('models/'):
+                score += 28
+            elif texture_rel.startswith(('items/', 'item/')):
+                score -= 100
             if score >= 24:
                 scored.append((score, texture_path))
         for _score, texture_path in sorted(scored, key=lambda item: (-item[0], item[1]))[:4]:
             if texture_path not in out:
                 out.append(texture_path)
     return out
+
+
+def _block_entity_model_context_score(class_name: str, model_path: str) -> int:
+    """Prefer the static model family that matches a TileEntity package.
+
+    Legacy jars can contain unrelated models with the same basename (for
+    example HBM has both machine/crucible.obj and weapons/crucible.obj). The
+    class package is useful static evidence and avoids contaminating one preview
+    with another feature's models/textures without executing the mod.
+    """
+    c = _camel_to_snake(class_name.replace('$', '_').replace('.', '/')).lower()
+    m = _camel_to_snake(model_path).lower()
+    normalize_context = {"machines":"machine", "reactors":"reactor", "weapons":"weapon", "trinkets":"trinket"}
+    context_words = {
+        normalize_context.get(word, word) for word in re.split(r'[/_]+', c)
+        if word in {"machine", "machines", "pile", "reactor", "reactors", "bomb", "deco", "weapon", "weapons", "trinket", "trinkets"}
+    }
+    model_dir_text = str(PurePosixPath(model_path).parent).lower()
+    model_words = {normalize_context.get(word, word) for word in re.split(r'[/_]+', model_dir_text)}
+    score = len(context_words & model_words) * 40
+    token = _normalized_asset_token(class_name)
+    if _normalized_asset_token(PurePosixPath(model_path).stem) == token:
+        score += 100
+    if "machine" in context_words and "weapon" in model_words:
+        score -= 100
+    return score
+
+
+def _select_block_entity_models(class_name: str, model_paths: Iterable[str]) -> list[str]:
+    paths = _ordered_unique(sorted(str(p) for p in model_paths))
+    if len(paths) <= 1:
+        return paths
+    scored = [(_block_entity_model_context_score(class_name, path), path) for path in paths]
+    best = max(score for score, _ in scored)
+    if best <= 100:
+        return paths
+    # Keep only the strongest family. Exact ties are retained because some
+    # models legitimately have multiple parts under the same package family.
+    return [path for score, path in scored if score == best][:4]
+
+
+def _preview_2d_asset(
+    names: Iterable[str],
+    *,
+    namespace: str,
+    registry: str,
+    class_name: str,
+    display_name: str,
+    linked_textures: Iterable[str],
+    is_block_entity: bool,
+) -> tuple[str, str, str]:
+    """Choose a conservative 2D preview asset without affecting mappings.
+
+    Exact registry-name item icons are strong for blocks. TileEntity rows do
+    not safely imply an ItemStack, so model/block textures outrank item icons
+    there; this prevents collisions such as HBM's weapon and machine crucible.
+    """
+    registry_rel = registry.split(':', 1)[1] if ':' in registry else registry
+    registry_token = _camel_to_snake(registry_rel).lower().strip('_')
+    class_token = _normalized_asset_token(class_name).lower().strip('_') if class_name else ''
+    display_token = _camel_to_snake(display_name).lower().replace(' ', '_').strip('_')
+    linked = set(str(x) for x in linked_textures)
+    scored: list[tuple[int, str, str, str]] = []
+    for path in names:
+        tm = _ANY_TEXTURE_RE.match(str(path))
+        if not tm or tm.group(1) != namespace:
+            continue
+        rel = tm.group(2)
+        if not rel.startswith(('items/', 'item/', 'blocks/', 'block/', 'models/')):
+            continue
+        stem = _camel_to_snake(PurePosixPath(rel).name).lower()
+
+        identity_score = 0
+        confidence = 'medium'
+        if registry_token and stem == registry_token:
+            identity_score = 140
+            confidence = 'high'
+        elif class_token and (stem == class_token or stem.startswith(class_token + '_')):
+            identity_score = 100
+        elif display_token and (stem == display_token or stem.startswith(display_token + '_')):
+            identity_score = 80
+        elif path in linked:
+            # Linked model/block textures may not share the class basename
+            # exactly (e.g. crucible_heat), but they are still valid fallback
+            # cards. Unlinked unrelated assets are never candidates.
+            identity_score = 60
+        if identity_score <= 0:
+            continue
+
+        score = identity_score
+        label = 'texture'
+        if rel.startswith(('items/', 'item/')):
+            label = 'item icon'
+            score += 100 if not is_block_entity else -20
+        elif rel.startswith(('blocks/', 'block/')):
+            label = 'block texture'
+            score += 45
+        elif rel.startswith('models/'):
+            label = 'model texture'
+            score += 55 if is_block_entity else 15
+        if path in linked:
+            score += 45
+        if is_block_entity and rel.startswith('models/'):
+            class_words = set(_preview_words(class_name))
+            score += len(class_words & set(_preview_words(rel))) * 12
+        scored.append((score, str(path), label, confidence))
+    if not scored:
+        first = next((str(x) for x in linked_textures if str(x)), '')
+        return (first, 'linked texture', 'low') if first else ('', '', 'low')
+    score, path, label, confidence = sorted(scored, key=lambda x: (-x[0], x[1]))[0]
+    if score >= 180:
+        confidence = 'high'
+    elif score < 100:
+        confidence = 'low'
+    return path, label, confidence
 
 def _infer_model_kind(rel: str, model_paths: list[str], blockstate_path: str) -> str:
     token = _camel_to_snake(rel).lower()
@@ -932,6 +1063,7 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
             if ns == primary_ns and _normalized_asset_token(stem) == token:
                 model_matches.extend(paths)
                 associated_model_assets.update(paths)
+        model_matches = _select_block_entity_models(class_name, model_matches)
         for (ns, rel), paths in textures.items():
             if ns == primary_ns and _normalized_asset_token(rel) == token:
                 texture_matches.extend(paths)
@@ -1182,11 +1314,13 @@ def _parse_obj_geometry(raw: bytes) -> tuple[list[list[float]], list[list[float]
 
 
 def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
-    """Build a safe, texture-aware static preview description for one row.
+    """Build a safe preview description with independent 3D and 2D choices.
 
-    No mod code is loaded or executed. The spec preserves enough material data
-    for the Qt side to render recognizable legacy blocks, full two-block doors,
-    custom campfire geometry, JSON elements and UV-mapped OBJ models.
+    No mod code is loaded or executed. ``auto_preview_mode`` is deliberately
+    conservative: static 3D is preferred when the packaged geometry has one
+    well-bound material family, while ambiguous legacy/TESR assets fall back to
+    a truthful icon/texture card. The mapping engine never consumes these
+    preview choices.
     """
     if hasattr(candidate, "__dict__"):
         data = dict(candidate.__dict__)
@@ -1195,13 +1329,19 @@ def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
     else:
         raise TypeError("preview candidate must be a catalog asset")
 
-    textures = [str(x) for x in (data.get("texture_paths") or [])]
+    candidate_textures = [str(x) for x in (data.get("texture_paths") or [])]
     models = [str(x) for x in (data.get("model_paths") or [])]
     blockstate = str(data.get("blockstate_path") or "")
     registry = str(data.get("registry_hint") or data.get("class_name") or "")
+    class_name = str(data.get("class_name") or "")
+    display_name = str(data.get("display_name") or "")
+    namespace = str(data.get("namespace") or (registry.split(":", 1)[0] if ":" in registry else "minecraft"))
     model_kind = str(data.get("model_kind") or "")
     candidate_kind = str(data.get("candidate_kind") or "").lower()
     is_block_entity = "block entity" in candidate_kind or "tileentity" in candidate_kind
+    original_model_count = len(models)
+    if is_block_entity:
+        models = _select_block_entity_models(class_name or registry, models)
 
     with zipfile.ZipFile(jar_path, "r") as zf:
         names = set(zf.namelist())
@@ -1215,14 +1355,38 @@ def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
         json_model = next((m for m in models if m.lower().endswith(".json") and m in names), "")
         obj_model = next((m for m in models if m.lower().endswith(".obj") and m in names), "")
         all_texture_paths = [name for name in names if _ANY_TEXTURE_RE.match(name)]
-        model_texture_paths = _associate_model_textures([m for m in (json_model, obj_model) if m], all_texture_paths)
-        textures = _ordered_unique(model_texture_paths + textures)
+        selected_model_paths = [m for m in (json_model, obj_model) if m]
+        model_texture_paths = _associate_model_textures(selected_model_paths, all_texture_paths)
+        if obj_model and any("/textures/models/" in path for path in model_texture_paths):
+            # For legacy OBJ/TESR assets, a dedicated textures/models atlas is
+            # stronger evidence than a same-named block face. Keep the latter
+            # available as a 2D candidate, but do not bind both to one mesh.
+            model_texture_paths = [path for path in model_texture_paths if "/textures/models/" in path]
+        all_linked_textures = _ordered_unique(model_texture_paths + candidate_textures)
+        preview_2d_path, preview_2d_kind, preview_2d_confidence = _preview_2d_asset(
+            names,
+            namespace=namespace,
+            registry=str(data.get("registry_hint") or ""),
+            class_name=class_name,
+            display_name=display_name,
+            linked_textures=all_linked_textures,
+            is_block_entity=is_block_entity,
+        )
+
+        common = {
+            "registry": registry,
+            "candidate_texture_paths": all_linked_textures,
+            "preview_2d_path": preview_2d_path,
+            "preview_2d_kind": preview_2d_kind,
+            "preview_2d_confidence": preview_2d_confidence,
+            "original_model_count": original_model_count,
+            "selected_model_count": len(models),
+        }
+
         if json_model:
             resolved = _resolve_json_model(zf, json_model)
             bindings = _json_texture_bindings(json_model, resolved, names)
-            for path in bindings.values():
-                if path not in textures:
-                    textures.append(path)
+            render_textures = _ordered_unique(list(bindings.values()) + model_texture_paths + candidate_textures)
             parent = str(resolved.get("parent") or "").lower()
             shape = model_kind or "json"
             if "cross" in parent:
@@ -1240,31 +1404,67 @@ def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
             elif shape in {"json", ""}:
                 shape = "cube"
             return {
+                **common,
                 "kind": shape,
-                "registry": registry,
                 "model_path": json_model,
-                "texture_paths": textures,
-                "texture_roles": _texture_roles(textures),
+                "texture_paths": render_textures,
+                "render_texture_paths": render_textures,
+                "texture_roles": _texture_roles(render_textures),
                 "texture_bindings": bindings,
                 "elements": resolved.get("elements") or [],
                 "parent": resolved.get("parent") or "",
+                "auto_preview_mode": "model",
+                "preview_fidelity": "high" if bindings or render_textures else "medium",
+                "preview_warnings": [],
                 "note": "Texture-aware static JSON model preview",
             }
 
         if obj_model:
-            vertices, texcoords, faces = _parse_obj_geometry(zf.read(obj_model))
+            raw = zf.read(obj_model)
+            vertices, texcoords, faces = _parse_obj_geometry(raw)
             if vertices and faces:
+                text = raw.decode("utf-8", "replace")
+                has_material_directives = any(
+                    line.lstrip().startswith(("mtllib ", "usemtl ")) for line in text.splitlines()
+                )
+                # A legacy OBJ renderer can bind several textures from Java
+                # between renderPart calls. Without executing that renderer we
+                # cannot safely assign those materials to faces. One dedicated
+                # texture family is safe; ambiguous families are better shown
+                # as a 2D icon/texture in Auto mode.
+                render_textures = _ordered_unique(model_texture_paths or candidate_textures)
+                warnings: list[str] = []
+                if original_model_count > len(models):
+                    warnings.append("multiple same-name model families were disambiguated using the block-entity class package")
+                if not texcoords:
+                    warnings.append("OBJ has no packaged UV coordinates")
+                if has_material_directives:
+                    warnings.append("OBJ declares material switching that the static analyzer cannot reproduce safely")
+                if len(render_textures) > 1:
+                    warnings.append("multiple candidate texture/material assets are linked to one legacy OBJ")
+                auto_mode = "model"
+                fidelity = "high"
+                if not texcoords:
+                    fidelity = "low"
+                elif has_material_directives or len(render_textures) > 1:
+                    fidelity = "medium"
+                if (fidelity != "high") and preview_2d_path:
+                    auto_mode = "2d"
                 return {
+                    **common,
                     "kind": "obj",
-                    "registry": registry,
                     "model_path": obj_model,
-                    "texture_paths": textures,
-                    "texture_roles": _texture_roles(textures),
+                    "texture_paths": render_textures,
+                    "render_texture_paths": render_textures,
+                    "texture_roles": _texture_roles(render_textures),
                     "vertices": vertices,
                     "texcoords": texcoords,
                     "faces": faces,
+                    "auto_preview_mode": auto_mode,
+                    "preview_fidelity": fidelity,
+                    "preview_warnings": warnings,
                     "note": (
-                        "UV-mapped static OBJ geometry preview" if texcoords and textures else
+                        "UV-mapped static OBJ geometry preview" if texcoords and render_textures else
                         "Static OBJ geometry has packaged UV coordinates but no linked texture asset" if texcoords else
                         "Static OBJ geometry preview (no UV coordinates packaged)"
                     ),
@@ -1272,31 +1472,37 @@ def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
 
     shape = model_kind or "cube"
     if is_block_entity:
-        # A TileEntity/BlockEntity does not imply cube geometry. If its packaged
-        # static model is a format we do not parse (DAE/HMF/TCN/etc.), or if it
-        # is rendered entirely by a TESR/BER, show a truthful 2D asset card (or
-        # an explicit unresolved message) rather than inventing a solid cube.
-        shape = "texture_card" if textures else "runtime_unresolved"
+        shape = "texture_card" if all_linked_textures else "runtime_unresolved"
     elif shape in {"json", "legacy_model", "obj", ""}:
-        shape = "cube" if textures else "asset"
+        shape = "cube" if all_linked_textures else "asset"
     if is_block_entity and shape == "texture_card":
         if models:
-            note = "Packaged block-entity model is not a supported static JSON/OBJ preview; showing the linked texture/icon without inventing runtime geometry"
+            note = "Packaged block-entity model is not a supported static JSON/OBJ preview; showing a linked icon/texture without inventing runtime geometry"
         else:
-            note = "Runtime block-entity renderer has no packaged static geometry; showing the linked texture/icon without inventing a cube"
+            note = "Runtime block-entity renderer has no packaged static geometry; showing a linked icon/texture without inventing a cube"
     elif is_block_entity and shape == "runtime_unresolved":
         note = "Runtime block-entity renderer could not be reconstructed safely from packaged static assets"
     else:
-        note = "Shape-aware static asset preview" if textures or models else "No packaged static model/texture was linked"
-    if shape == "door" and textures:
+        note = "Shape-aware static asset preview" if all_linked_textures or models else "No packaged static model/texture was linked"
+    if shape == "door" and all_linked_textures:
         note = "Synthesized full two-block door preview from packaged top/bottom textures"
-    elif shape == "campfire" and textures:
+    elif shape == "campfire" and all_linked_textures:
         note = "Synthesized campfire preview from packaged legacy renderer textures"
+    auto_mode = "model" if shape not in {"texture_card", "runtime_unresolved", "asset"} else "2d"
     return {
         "kind": shape,
         "registry": registry,
         "model_path": models[0] if models else "",
-        "texture_paths": textures,
-        "texture_roles": _texture_roles(textures),
+        "texture_paths": all_linked_textures,
+        "render_texture_paths": all_linked_textures,
+        "texture_roles": _texture_roles(all_linked_textures),
+        "preview_2d_path": preview_2d_path,
+        "preview_2d_kind": preview_2d_kind,
+        "preview_2d_confidence": preview_2d_confidence,
+        "auto_preview_mode": auto_mode,
+        "preview_fidelity": "medium" if all_linked_textures else "low",
+        "preview_warnings": [],
+        "original_model_count": original_model_count,
+        "selected_model_count": len(models),
         "note": note,
     }
