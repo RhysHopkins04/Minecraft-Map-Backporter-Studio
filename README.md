@@ -47,12 +47,12 @@ The analyzer performs bounded static inspection without loading or executing the
 - JSON block models plus legacy OBJ/DAE/HMF/TCN assets where packaged,
 - block textures and English-first display/localization hints,
 - likely registry-name hints with confidence/evidence labels,
-- a safe static right-side model/shape preview built from packaged JSON/OBJ/texture assets,
+- a safe texture-aware right-side preview: per-face JSON textures, UV-aware OBJ textures, full two-block doors, animation-frame handling, and recognized legacy shapes such as campfires/lanterns without executing mod code,
 - a provider role that distinguishes ordinary catalogs, reviewed architectural fallbacks, and likely vanilla-content backport providers.
 
 The goal is broad coverage from the 1.7.10 era through modern 1.21-era JAR layouts, not a claim that arbitrary runtime-generated registration can always be reconstructed statically. Published mods can use custom registries, obfuscated/intermediary names, runtime renderers, or generated assets that cannot be proven without actually loading that exact Minecraft/loader environment; those cases remain explicitly advisory rather than being invented.
 
-For legacy Forge mods, class/enum evidence is stronger than blindly treating every file under `textures/blocks` as registered. For modern mods, blockstates are strong asset evidence. Block/tile entities are shown separately and do not automatically become conversion mappings.
+For legacy Forge mods, class/enum evidence is stronger than blindly treating every file under `textures/blocks` as registered. Backport providers can also associate a registered provider block with faithful textures intentionally packaged under `assets/minecraft`, as Et Futurum does. For modern mods, blockstates are strong asset evidence. Block/tile entities are shown separately and do not automatically become conversion mappings. The preview remains a static inspection tool: it can reconstruct packaged model/texture data and selected well-known legacy shapes, but it does not execute TESRs/BERs or arbitrary custom rendering code.
 
 ### Modpack Analyzer
 

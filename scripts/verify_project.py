@@ -398,9 +398,13 @@ for token in [
     'assert modern.loader_hint == "Fabric"',
     'assert len(modern.block_entities) == 1',
     'spec = build_preview_spec(jar, moss)',
+    'assert door_spec["kind"] == "door"',
+    'assert campfire_spec["kind"] == "campfire"',
+    'assert be_spec["kind"] == "obj"',
+    'assert "UV-mapped" in be_spec["note"]',
 ]:
     if token not in test_smoke:
-        error(f"Patch 015 analyzer/provider regression test missing: {token}")
+        error(f"Analyzer/provider/preview regression test missing: {token}")
 
 for token in [
     '"mapping_quality_block_occurrences":dict(quality_occurrences)',
@@ -538,8 +542,12 @@ for token in [
     'class BlockEntityAsset',
     '_ANY_MODEL_RE = re.compile',
     'def build_preview_spec(',
-    'Static JSON model preview',
-    'Static OBJ geometry preview',
+    'Texture-aware static JSON model preview',
+    'UV-mapped static OBJ geometry preview',
+    'def _associate_preview_textures(',
+    'assets/minecraft',
+    'Synthesized full two-block door preview',
+    'Synthesized campfire preview',
     'backport_provider',
     'architectural_fallback',
     'mapping_aliases=_candidate_aliases(rel)',
@@ -547,6 +555,21 @@ for token in [
 ]:
     if token not in jar_analyzer and token != 'class BlockEntityAsset':
         error(f"Cross-generation JAR analyzer invariant missing: {token}")
+
+for token in [
+    'def _preview_images(',
+    'image.convertToFormat(QImage.Format.Format_RGBA8888)',
+    'path + ".mcmeta" in names',
+    'def _draw_textured_quad(',
+    'painter.drawImage(bounds, image, QRectF(image.rect()))',
+    'def _draw_uv_triangle(',
+    'elif kind == "door":',
+    'elif kind == "campfire":',
+    'elif kind == "lantern":',
+]:
+    if token not in main_window:
+        error(f"Patch 016 high-fidelity static preview invariant missing: {token}")
+
 
 catalog_model_path = root / "src/wgmap_backporter_studio/core/catalog.py"
 catalog_model = catalog_model_path.read_text(encoding="utf-8") if catalog_model_path.exists() else ""

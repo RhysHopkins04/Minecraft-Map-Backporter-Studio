@@ -7,8 +7,8 @@ import traceback
 import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QThread, Qt, Signal, Slot, QStandardPaths, QUrl
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFontMetrics, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtCore import QObject, QPointF, QRectF, QThread, Qt, Signal, Slot, QStandardPaths, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -59,42 +59,194 @@ def _application_storage_root() -> Path:
     return base / APP_NAME
 
 
-def _preview_texture(jar_path: str, paths: list[str]) -> QPixmap | None:
-    for path in paths:
-        try:
-            raw = read_asset_bytes(jar_path, path)
-            px = QPixmap()
-            if px.loadFromData(raw) and not px.isNull():
-                return px.scaled(96, 96, Qt.IgnoreAspectRatio, Qt.FastTransformation)
-        except Exception:
-            continue
-    return None
+def _preview_images(jar_path: str, paths: list[str]) -> dict[str, QImage]:
+    """Load linked texture images once, preserving alpha and animation frame 0."""
+    loaded: dict[str, QImage] = {}
+    try:
+        with zipfile.ZipFile(jar_path, "r") as zf:
+            names = set(zf.namelist())
+            for path in paths[:16]:
+                try:
+                    raw = zf.read(path)
+                except Exception:
+                    continue
+                image = QImage.fromData(raw)
+                if image.isNull():
+                    continue
+                image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+                # Animated Minecraft block textures are vertical strips with a
+                # sidecar .mcmeta. Preview the first frame rather than crushing
+                # the whole animation into one face.
+                if path + ".mcmeta" in names and image.width() > 0 and image.height() >= image.width():
+                    frame = image.copy(0, 0, image.width(), image.width())
+                    if not frame.isNull():
+                        image = frame
+                loaded[path] = image
+    except Exception:
+        pass
+    return loaded
 
 
-def _project_iso(x: float, y: float, z: float, cx: float, cy: float, scale: float) -> QPointF:
-    return QPointF(cx + (x - z) * scale, cy + (x + z) * scale * 0.48 - y * scale)
+def _project_raw(point) -> tuple[float, float]:
+    x, y, z = [float(v) for v in point]
+    return (x - z, (x + z) * 0.48 - y)
 
 
-def _draw_iso_box(painter: QPainter, bounds, brush: QBrush, cx: float, cy: float, scale: float) -> None:
+def _fit_iso_projection(vertices: list[tuple[float, float, float]], size: int):
+    if not vertices:
+        vertices = [(0, 0, 0), (16, 16, 16)]
+    raw = [_project_raw(v) for v in vertices]
+    min_x = min(p[0] for p in raw); max_x = max(p[0] for p in raw)
+    min_y = min(p[1] for p in raw); max_y = max(p[1] for p in raw)
+    span_x = max(max_x - min_x, 1.0); span_y = max(max_y - min_y, 1.0)
+    margin_x = 24.0
+    top_margin = 18.0
+    bottom_reserved = 36.0
+    scale = min((size - margin_x * 2) / span_x, (size - top_margin - bottom_reserved) / span_y)
+    scale = max(scale, 0.1)
+    offset_x = size * 0.5 - ((min_x + max_x) * 0.5) * scale
+    offset_y = top_margin - min_y * scale
+    return offset_x, offset_y, scale
+
+
+def _project_iso(point, transform) -> QPointF:
+    rx, ry = _project_raw(point)
+    ox, oy, scale = transform
+    return QPointF(ox + rx * scale, oy + ry * scale)
+
+
+def _texture_path_for_role(roles: dict[str, str], role: str) -> str:
+    if role in roles:
+        return roles[role]
+    if role in {"east", "south", "north", "west"} and "side" in roles:
+        return roles["side"]
+    if role == "up" and "top" in roles:
+        return roles["top"]
+    if role == "down" and "bottom" in roles:
+        return roles["bottom"]
+    return roles.get("all", "")
+
+
+def _draw_textured_quad(
+    painter: QPainter,
+    points: list[QPointF],
+    image: QImage | None,
+    shade: int = 0,
+    opacity: float = 1.0,
+) -> None:
+    if len(points) < 3:
+        return
+    polygon = QPolygonF(points)
+    painter.save()
+    painter.setOpacity(opacity)
+    if image is not None and not image.isNull():
+        path = QPainterPath()
+        path.addPolygon(polygon)
+        painter.setClipPath(path)
+        bounds = polygon.boundingRect()
+        # Nearest-neighbour scaling keeps Minecraft pixel art crisp. Clipping a
+        # face-sized image is intentionally preferable to QBrush texture tiling,
+        # which caused the pre-Patch-016 "texture soup" screenshots.
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+        painter.drawImage(bounds, image, QRectF(image.rect()))
+        if shade:
+            overlay = QColor(0, 0, 0, max(0, min(180, shade)))
+            painter.fillPath(path, overlay)
+    else:
+        painter.setBrush(QColor("#68798a"))
+        painter.drawPolygon(polygon)
+    painter.restore()
+    painter.setOpacity(1.0)
+    painter.setPen(QPen(QColor(90, 110, 130, 150), 1))
+    painter.setBrush(Qt.NoBrush)
+    painter.drawPolygon(polygon)
+
+
+def _box_visible_faces(bounds) -> list[tuple[str, list[tuple[float, float, float]], int]]:
     x0, y0, z0, x1, y1, z1 = [float(v) for v in bounds]
-    # Draw the two visible side faces before the top face. A real Minecraft
-    # renderer is unnecessary here: this static projection is intended to show
-    # block shape/model identity safely without executing mod code.
-    right = QPolygonF([
-        _project_iso(x1, y0, z0, cx, cy, scale), _project_iso(x1, y0, z1, cx, cy, scale),
-        _project_iso(x1, y1, z1, cx, cy, scale), _project_iso(x1, y1, z0, cx, cy, scale),
-    ])
-    left = QPolygonF([
-        _project_iso(x0, y0, z1, cx, cy, scale), _project_iso(x1, y0, z1, cx, cy, scale),
-        _project_iso(x1, y1, z1, cx, cy, scale), _project_iso(x0, y1, z1, cx, cy, scale),
-    ])
-    top = QPolygonF([
-        _project_iso(x0, y1, z0, cx, cy, scale), _project_iso(x1, y1, z0, cx, cy, scale),
-        _project_iso(x1, y1, z1, cx, cy, scale), _project_iso(x0, y1, z1, cx, cy, scale),
-    ])
-    painter.setBrush(brush); painter.setOpacity(0.72); painter.drawPolygon(left)
-    painter.setOpacity(0.88); painter.drawPolygon(right)
-    painter.setOpacity(1.0); painter.drawPolygon(top)
+    return [
+        ("south", [(x0,y0,z1),(x1,y0,z1),(x1,y1,z1),(x0,y1,z1)], 42),
+        ("east",  [(x1,y0,z0),(x1,y0,z1),(x1,y1,z1),(x1,y1,z0)], 22),
+        ("up",    [(x0,y1,z0),(x1,y1,z0),(x1,y1,z1),(x0,y1,z1)], 0),
+    ]
+
+
+def _draw_box(painter, bounds, transform, images, roles, role_override: str = "") -> None:
+    for face_role, verts, shade in _box_visible_faces(bounds):
+        texture_role = role_override or face_role
+        path = _texture_path_for_role(roles, texture_role)
+        image = images.get(path)
+        _draw_textured_quad(painter, [_project_iso(v, transform) for v in verts], image, shade=shade)
+
+
+def _sample_texture(image: QImage, uv: tuple[float, float], shade: float = 1.0) -> QColor:
+    if image.isNull() or image.width() <= 0 or image.height() <= 0:
+        return QColor("#68798a")
+    u = max(0.0, min(1.0, uv[0]))
+    v = max(0.0, min(1.0, uv[1]))
+    x = min(image.width() - 1, int(u * image.width()))
+    y = min(image.height() - 1, int((1.0 - v) * image.height()))
+    c = image.pixelColor(x, y)
+    return QColor(
+        max(0, min(255, int(c.red() * shade))),
+        max(0, min(255, int(c.green() * shade))),
+        max(0, min(255, int(c.blue() * shade))),
+        c.alpha(),
+    )
+
+
+def _mix_point(a: QPointF, b: QPointF, c: QPointF, u: float, v: float) -> QPointF:
+    w = 1.0 - u - v
+    return QPointF(a.x()*w + b.x()*u + c.x()*v, a.y()*w + b.y()*u + c.y()*v)
+
+
+def _mix_uv(a, b, c, u: float, v: float) -> tuple[float, float]:
+    w = 1.0 - u - v
+    return (a[0]*w + b[0]*u + c[0]*v, a[1]*w + b[1]*u + c[1]*v)
+
+
+def _draw_uv_triangle(painter: QPainter, pts, uvs, image: QImage, subdivisions: int = 6) -> None:
+    """Approximate perspective texture mapping with a bounded UV micro-mesh."""
+    p0, p1, p2 = pts
+    t0, t1, t2 = uvs
+    n = max(2, min(10, subdivisions))
+    painter.setPen(Qt.NoPen)
+    for i in range(n):
+        for j in range(n - i):
+            u0, v0 = i/n, j/n
+            u1, v1 = (i+1)/n, j/n
+            u2, v2 = i/n, (j+1)/n
+            a = _mix_point(p0,p1,p2,u0,v0); b = _mix_point(p0,p1,p2,u1,v1); c = _mix_point(p0,p1,p2,u2,v2)
+            tuv = _mix_uv(t0,t1,t2,(u0+u1+u2)/3,(v0+v1+v2)/3)
+            painter.setBrush(_sample_texture(image, tuv, 0.94))
+            painter.drawPolygon(QPolygonF([a,b,c]))
+            if i + j + 1 < n:
+                u3, v3 = (i+1)/n, (j+1)/n
+                d = _mix_point(p0,p1,p2,u3,v3)
+                tuv2 = _mix_uv(t0,t1,t2,(u1+u2+u3)/3,(v1+v2+v3)/3)
+                painter.setBrush(_sample_texture(image, tuv2, 0.94))
+                painter.drawPolygon(QPolygonF([b,d,c]))
+
+
+def _preview_scene_vertices(kind: str, elements, obj_vertices) -> list[tuple[float,float,float]]:
+    if kind == "obj" and obj_vertices:
+        return [tuple(map(float, v[:3])) for v in obj_vertices]
+    if kind == "door":
+        return [(0,0,7),(16,32,9)]
+    if kind == "campfire":
+        return [(0,0,0),(16,18,16)]
+    if kind in {"sign", "hanging_sign"}:
+        return [(0,0,6),(16,18,10)]
+    if kind == "elements" and elements:
+        verts=[]
+        for e in elements:
+            if isinstance(e,dict) and isinstance(e.get("from"),list) and isinstance(e.get("to"),list):
+                lo=e["from"]; hi=e["to"]
+                if len(lo)>=3 and len(hi)>=3:
+                    verts.extend([(float(lo[0]),float(lo[1]),float(lo[2])),(float(hi[0]),float(hi[1]),float(hi[2]))])
+        if verts:
+            return verts
+    return [(0,0,0),(16,16,16)]
 
 
 def _render_static_preview(jar_path: str, candidate, size: int = 280) -> tuple[QPixmap, str]:
@@ -103,69 +255,149 @@ def _render_static_preview(jar_path: str, candidate, size: int = 280) -> tuple[Q
     canvas.fill(QColor("#0b0f14"))
     painter = QPainter(canvas)
     painter.setRenderHint(QPainter.Antialiasing, True)
-    painter.setPen(QPen(QColor("#708090"), 1))
-    texture = _preview_texture(jar_path, list(spec.get("texture_paths") or []))
-    brush = QBrush(texture) if texture is not None else QBrush(QColor("#66788a"))
-    cx, cy, scale = size * 0.50, size * 0.68, size / 58.0
 
+    texture_paths = list(spec.get("texture_paths") or [])
+    images = _preview_images(jar_path, texture_paths)
+    roles = dict(spec.get("texture_roles") or {})
     kind = str(spec.get("kind") or "asset")
-    if kind == "asset" and texture is None and not spec.get("model_path"):
+    elements = list(spec.get("elements") or [])
+    obj_vertices = list(spec.get("vertices") or [])
+
+    # OBJ coordinates are often in [-0.5, 0.5] or arbitrary author units.
+    # Normalize only for framing; UVs remain untouched.
+    normalized_obj = obj_vertices
+    if kind == "obj" and obj_vertices:
+        xs=[float(v[0]) for v in obj_vertices]; ys=[float(v[1]) for v in obj_vertices]; zs=[float(v[2]) for v in obj_vertices]
+        span=max(max(xs)-min(xs),max(ys)-min(ys),max(zs)-min(zs),1e-6)
+        normalized_obj=[
+            ((float(v[0])-min(xs))/span*16, (float(v[1])-min(ys))/span*16, (float(v[2])-min(zs))/span*16)
+            for v in obj_vertices
+        ]
+
+    scene_vertices = _preview_scene_vertices(kind, elements, normalized_obj)
+    transform = _fit_iso_projection(scene_vertices, size)
+
+    if kind == "asset" and not images and not spec.get("model_path"):
         painter.setPen(QColor("#9aa8b7"))
         painter.drawText(canvas.rect(), Qt.AlignCenter, "No packaged static model\nor texture linked")
-    elif kind == "obj" and spec.get("vertices") and spec.get("faces"):
-        verts = [list(map(float, v[:3])) for v in spec["vertices"]]
-        xs=[v[0] for v in verts]; ys=[v[1] for v in verts]; zs=[v[2] for v in verts]
-        spans=[max(xs)-min(xs),max(ys)-min(ys),max(zs)-min(zs)]
-        span=max(max(spans),1e-6)
-        norm=[((v[0]-min(xs))/span*16,(v[1]-min(ys))/span*16,(v[2]-min(zs))/span*16) for v in verts]
-        polys=[]
-        for face in spec["faces"]:
-            pts=[_project_iso(*norm[i],cx,cy,scale) for i in face if 0 <= i < len(norm)]
-            if len(pts)>=3:
-                avg=sum(p.y() for p in pts)/len(pts)
-                polys.append((avg,QPolygonF(pts)))
-        for _avg,poly in sorted(polys,key=lambda x:x[0]):
-            painter.setBrush(brush); painter.setOpacity(0.86); painter.drawPolygon(poly)
-        painter.setOpacity(1.0)
+    elif kind == "obj" and normalized_obj and spec.get("faces"):
+        faces = list(spec.get("faces") or [])
+        texcoords = list(spec.get("texcoords") or [])
+        default_path = roles.get("all") or (texture_paths[0] if texture_paths else "")
+        texture = images.get(default_path)
+        draw_faces=[]
+        for face in faces:
+            vis = face.get("vertices") if isinstance(face,dict) else face
+            if not isinstance(vis,list) or len(vis)<3:
+                continue
+            pts3=[normalized_obj[i] for i in vis if isinstance(i,int) and 0 <= i < len(normalized_obj)]
+            if len(pts3)<3:
+                continue
+            depth=sum(p[0]+p[2]-p[1]*0.15 for p in pts3)/len(pts3)
+            draw_faces.append((depth,face,pts3))
+        for _depth,face,pts3 in sorted(draw_faces,key=lambda x:x[0]):
+            vis=face.get("vertices",[]); uis=face.get("uvs",[])
+            for i in range(1,len(pts3)-1):
+                tri3=[pts3[0],pts3[i],pts3[i+1]]
+                tri2=[_project_iso(v,transform) for v in tri3]
+                uv_ok = texture is not None and len(uis)==len(vis)
+                tri_uv=[]
+                if uv_ok:
+                    for pos in (0,i,i+1):
+                        ui=uis[pos]
+                        if not isinstance(ui,int) or not (0 <= ui < len(texcoords)):
+                            uv_ok=False; break
+                        uv=texcoords[ui]
+                        tri_uv.append((float(uv[0]),float(uv[1])))
+                if uv_ok:
+                    _draw_uv_triangle(painter,tri2,tri_uv,texture,6)
+                else:
+                    _draw_textured_quad(painter,tri2,texture,shade=18)
+        painter.setPen(QPen(QColor(100,120,140,120),1))
     elif kind == "cross":
-        planes=[[(0,0,0),(16,0,16),(16,16,16),(0,16,0)],[(16,0,0),(0,0,16),(0,16,16),(16,16,0)]]
-        for plane in planes:
-            painter.setBrush(brush); painter.setOpacity(0.92)
-            painter.drawPolygon(QPolygonF([_project_iso(*v,cx,cy,scale) for v in plane]))
-        painter.setOpacity(1.0)
-    else:
-        elements=[]
-        if kind == "elements":
-            for element in spec.get("elements") or []:
-                if not isinstance(element, dict):
-                    continue
-                lo=element.get("from"); hi=element.get("to")
-                if isinstance(lo,list) and isinstance(hi,list) and len(lo)>=3 and len(hi)>=3:
-                    elements.append((lo[0],lo[1],lo[2],hi[0],hi[1],hi[2]))
-        elif kind == "slab":
-            elements=[(0,0,0,16,8,16)]
-        elif kind == "stairs":
-            elements=[(0,0,0,16,8,16),(0,8,8,16,16,16)]
-        elif kind == "fence":
-            elements=[(6,0,6,10,16,10),(0,5,7,16,8,9),(0,11,7,16,14,9)]
-        elif kind == "pane" or kind == "thin":
-            elements=[(7,0,0,9,16,16)]
-        elif kind == "wall":
-            elements=[(5,0,5,11,16,11),(0,0,6,16,12,10)]
+        path=_texture_path_for_role(roles,"all"); image=images.get(path)
+        for plane in (
+            [(0,0,0),(16,0,16),(16,16,16),(0,16,0)],
+            [(16,0,0),(0,0,16),(0,16,16),(16,16,0)],
+        ):
+            _draw_textured_quad(painter,[_project_iso(v,transform) for v in plane],image,opacity=0.96)
+    elif kind == "door":
+        bottom_path=roles.get("door_bottom") or roles.get("bottom") or roles.get("all","")
+        top_path=roles.get("door_top") or roles.get("top") or roles.get("all","")
+        bottom_roles={"all":bottom_path}; top_roles={"all":top_path}
+        _draw_box(painter,(0,0,7,16,16,9),transform,images,bottom_roles,"all")
+        _draw_box(painter,(0,16,7,16,32,9),transform,images,top_roles,"all")
+    elif kind == "trapdoor":
+        _draw_box(painter,(0,0,0,16,3,16),transform,images,roles)
+    elif kind == "carpet":
+        _draw_box(painter,(0,0,0,16,1,16),transform,images,roles)
+    elif kind == "campfire":
+        registry_token = str(spec.get("registry") or "").lower()
+        is_unlit = "_base" in registry_token or "unlit" in registry_token
+        log_path=(roles.get("log") if is_unlit else roles.get("log_lit")) or roles.get("log") or roles.get("all","")
+        fire_path="" if is_unlit else roles.get("fire","")
+        log_roles={"all":log_path}
+        for bounds in ((1,0,3,15,4,6),(1,0,10,15,4,13),(3,3,1,6,7,15),(10,3,1,13,7,15)):
+            _draw_box(painter,bounds,transform,images,log_roles,"all")
+        fire=images.get(fire_path)
+        if fire is not None:
+            for plane in (
+                [(3,5,3),(13,5,13),(13,18,13),(3,18,3)],
+                [(13,5,3),(3,5,13),(3,18,13),(13,18,3)],
+            ):
+                _draw_textured_quad(painter,[_project_iso(v,transform) for v in plane],fire,opacity=0.96)
+    elif kind == "lantern":
+        _draw_box(painter,(4,1,4,12,10,12),transform,images,roles)
+        _draw_box(painter,(6,10,6,10,13,10),transform,images,roles)
+        _draw_box(painter,(6,13,7,10,16,9),transform,images,roles)
+    elif kind in {"sign","hanging_sign"}:
+        _draw_box(painter,(2,7,7,14,16,9),transform,images,roles)
+        if kind == "sign":
+            _draw_box(painter,(7,0,7,9,7,9),transform,images,roles)
         else:
-            elements=[(0,0,0,16,16,16)]
-        for bounds in sorted(elements,key=lambda b:b[1]):
-            _draw_iso_box(painter,bounds,brush,cx,cy,scale)
+            _draw_box(painter,(4,16,7,6,18,9),transform,images,roles)
+            _draw_box(painter,(10,16,7,12,18,9),transform,images,roles)
+    elif kind == "elements" and elements:
+        bindings=dict(spec.get("texture_bindings") or {})
+        for element in sorted(elements,key=lambda e: float((e.get("from") or [0,0,0])[1]) if isinstance(e,dict) else 0):
+            if not isinstance(element,dict):
+                continue
+            lo=element.get("from"); hi=element.get("to")
+            if not (isinstance(lo,list) and isinstance(hi,list) and len(lo)>=3 and len(hi)>=3):
+                continue
+            bounds=(lo[0],lo[1],lo[2],hi[0],hi[1],hi[2])
+            faces=element.get("faces") if isinstance(element.get("faces"),dict) else {}
+            for face_role,verts,shade in _box_visible_faces(bounds):
+                json_face=faces.get(face_role) if isinstance(faces,dict) else None
+                texture_path=""
+                if isinstance(json_face,dict):
+                    ref=str(json_face.get("texture") or "")
+                    if ref.startswith("#"):
+                        texture_path=bindings.get(ref[1:],"")
+                if not texture_path:
+                    texture_path=_texture_path_for_role(roles,face_role)
+                _draw_textured_quad(painter,[_project_iso(v,transform) for v in verts],images.get(texture_path),shade=shade)
+    else:
+        if kind == "slab": elements2=[(0,0,0,16,8,16)]
+        elif kind == "stairs": elements2=[(0,0,0,16,8,16),(0,8,8,16,16,16)]
+        elif kind == "fence": elements2=[(6,0,6,10,16,10),(0,5,7,16,8,9),(0,11,7,16,14,9)]
+        elif kind == "pane" or kind == "thin": elements2=[(7,0,0,9,16,16)]
+        elif kind == "wall": elements2=[(5,0,5,11,16,11),(0,0,6,16,12,10)]
+        else: elements2=[(0,0,0,16,16,16)]
+        for bounds in sorted(elements2,key=lambda b:b[1]):
+            _draw_box(painter,bounds,transform,images,roles)
 
     painter.setOpacity(1.0)
     painter.setPen(QColor("#d8dee9"))
     label = str(spec.get("registry") or "")
     if label:
-        painter.drawText(10, size - 12, label[:48])
+        painter.drawText(10, size - 12, label[:54])
     painter.end()
     detail = str(spec.get("note") or "Static asset preview")
     if spec.get("model_path"):
         detail += f"\n{spec['model_path']}"
+    if texture_paths:
+        detail += f"\n{len(texture_paths)} linked texture(s)"
     return canvas, detail
 
 

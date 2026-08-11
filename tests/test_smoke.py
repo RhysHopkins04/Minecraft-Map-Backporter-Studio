@@ -54,7 +54,7 @@ def _minimal_block_holder_class() -> bytes:
 
 
 def _minimal_enum_block_registry_class() -> bytes:
-    """Tiny ModBlocks-style enum with two enum constants and registration evidence."""
+    """Tiny ModBlocks-style enum with representative backport entries."""
     cp = []
 
     def utf8(value: str):
@@ -70,8 +70,7 @@ def _minimal_enum_block_registry_class() -> bytes:
     this_class = class_ref(this_name)
     super_name = utf8("java/lang/Enum")
     super_class = class_ref(super_name)
-    moss_name = utf8("MOSS_BLOCK")
-    roots_name = utf8("HANGING_ROOTS")
+    field_names = [utf8(name) for name in ("MOSS_BLOCK", "HANGING_ROOTS", "CHERRY_DOOR", "CAMPFIRE")]
     own_desc = utf8("Lfuture/ModBlocks;")
     utf8("GameRegistry")
     utf8("registerBlock")
@@ -84,9 +83,9 @@ def _minimal_enum_block_registry_class() -> bytes:
         out += entry
     out += struct.pack(">HHH", 0x4021, this_class, super_class)
     out += struct.pack(">H", 0)
-    out += struct.pack(">H", 2)
-    out += struct.pack(">HHHH", 0x4019, moss_name, own_desc, 0)
-    out += struct.pack(">HHHH", 0x4019, roots_name, own_desc, 0)
+    out += struct.pack(">H", len(field_names))
+    for field_name in field_names:
+        out += struct.pack(">HHHH", 0x4019, field_name, own_desc, 0)
     out += struct.pack(">H", 0)
     out += struct.pack(">H", 0)
     return bytes(out)
@@ -168,15 +167,27 @@ def make_enum_backport_jar(path: Path):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         # Deliberately no mcmod.info: loader/mod-id inference must still work.
         z.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\nFMLCorePluginContainsFMLMod: true\n")
-        z.writestr("assets/etfuturum/textures/blocks/moss_block.png", png)
+        # Et Futurum-style legacy providers commonly register under their own
+        # namespace while packaging modern-vanilla textures under minecraft.
+        z.writestr("assets/minecraft/textures/blocks/moss_block.png", png)
+        z.writestr("assets/minecraft/textures/blocks/cherry_door_bottom.png", png)
+        z.writestr("assets/minecraft/textures/blocks/cherry_door_top.png", png)
+        z.writestr("assets/etfuturum/textures/blocks/campfire_log.png", png)
+        z.writestr("assets/etfuturum/textures/blocks/campfire_fire.png", png)
         z.writestr("assets/etfuturum/textures/blocks/hanging_roots.png", png)
         z.writestr("assets/etfuturum/models/block/moss_block.json", json.dumps({
             "parent": "block/cube_all",
-            "textures": {"all": "etfuturum:blocks/moss_block"},
+            "textures": {"all": "minecraft:blocks/moss_block"},
         }))
         z.writestr("assets/etfuturum/blockstates/moss_block.json", json.dumps({
             "variants": {"normal": {"model": "etfuturum:block/moss_block"}}
         }))
+        z.writestr("assets/etfuturum/models/blocks/fancy_sign.obj", "\n".join([
+            "v 0 0 0", "v 1 0 0", "v 0 1 0",
+            "vt 0 0", "vt 1 0", "vt 0 1",
+            "f 1/1 2/2 3/3",
+        ]))
+        z.writestr("assets/etfuturum/textures/blocks/fancy_sign.png", png)
         z.writestr("future/ModBlocks.class", _minimal_enum_block_registry_class())
         z.writestr("future/TileEntityFancySign.class", _minimal_tile_entity_class())
 
@@ -385,13 +396,32 @@ def test_cross_generation_jar_analysis_and_preview():
         hints = {block.registry_hint for block in cat.blocks}
         assert "etfuturum:moss_block" in hints
         assert "etfuturum:hanging_roots" in hints
+        assert "etfuturum:cherry_door" in hints
+        assert "etfuturum:campfire" in hints
         assert len(cat.block_entities) == 1
         assert "TileEntityFancySign" in cat.block_entities[0].class_name
         moss = next(block for block in cat.blocks if block.registry_hint == "etfuturum:moss_block")
         spec = build_preview_spec(jar, moss)
         assert spec["kind"] in {"cube", "elements"}
         assert spec["model_path"].endswith("moss_block.json")
-        assert any(path.endswith("moss_block.png") for path in spec["texture_paths"])
+        assert any(path == "assets/minecraft/textures/blocks/moss_block.png" for path in spec["texture_paths"])
+
+        door = next(block for block in cat.blocks if block.registry_hint == "etfuturum:cherry_door")
+        door_spec = build_preview_spec(jar, door)
+        assert door_spec["kind"] == "door"
+        assert door_spec["texture_roles"]["door_bottom"].endswith("cherry_door_bottom.png")
+        assert door_spec["texture_roles"]["door_top"].endswith("cherry_door_top.png")
+
+        campfire = next(block for block in cat.blocks if block.registry_hint == "etfuturum:campfire")
+        campfire_spec = build_preview_spec(jar, campfire)
+        assert campfire_spec["kind"] == "campfire"
+        assert campfire_spec["texture_roles"]["log"].endswith("campfire_log.png")
+        assert campfire_spec["texture_roles"]["fire"].endswith("campfire_fire.png")
+
+        be_spec = build_preview_spec(jar, cat.block_entities[0])
+        assert be_spec["kind"] == "obj"
+        assert be_spec["texcoords"] and be_spec["faces"][0]["uvs"] == [0, 1, 2]
+        assert "UV-mapped" in be_spec["note"]
 
         modern_jar = Path(td) / "modern-fabric.jar"
         make_modern_fabric_jar(modern_jar)

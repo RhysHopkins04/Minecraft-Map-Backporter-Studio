@@ -191,6 +191,12 @@ For the analyzer/provider work, verify all of the following before relying on a 
 - modern Forge/NeoForge/Fabric/Quilt blockstate/model layouts remain discoverable;
 - packaged legacy `TileEntity` and modern `BlockEntity` subclasses are listed separately from blocks;
 - the right-hand preview uses packaged static JSON/OBJ/texture information and never executes a mod's custom renderer;
+- Et Futurum-style backport blocks can link their registered `etfuturum:*` candidates to matching modern-vanilla textures packaged under `assets/minecraft`;
+- ordinary textured cubes show recognizable per-face pixel art rather than screen-space tiled/warped texture brushes;
+- two-block doors render both bottom and top halves using their corresponding textures;
+- vertical animated block textures preview frame 0 rather than being compressed into one face;
+- OBJ previews use packaged UV coordinates when present instead of painting one texture indiscriminately across the whole mesh;
+- Campfire Backport-style code-rendered campfires are represented by a synthesized crossed-log/fire preview rather than a full cube when their packaged texture family is discoverable;
 - HBM remains an architectural fallback rather than receiving automatic exact-name mapping authority;
 - recognized backport-provider catalogs are carried separately in the active workspace snapshot;
 - an exact provider target is selected only when the target world registry actually contains it;

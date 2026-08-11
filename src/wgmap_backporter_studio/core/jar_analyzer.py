@@ -439,22 +439,104 @@ def _normalized_asset_token(value: str) -> str:
     return value
 
 
+_PREVIEW_GENERIC_WORDS = {
+    "block", "blocks", "tile", "tiles", "cfb", "lit", "unlit", "base", "model",
+}
+
+
+def _preview_words(value: str) -> tuple[str, ...]:
+    token = _camel_to_snake(value.rsplit("/", 1)[-1]).lower()
+    return tuple(word for word in token.split("_") if word and word not in _PREVIEW_GENERIC_WORDS)
+
+
+def _texture_match_score(candidate: str, texture_rel: str) -> int:
+    """Score how likely a packaged texture belongs to a legacy registry candidate.
+
+    Legacy 1.7.10 backports frequently register blocks under their own namespace
+    while intentionally packaging Mojang-style block textures under
+    ``assets/minecraft``. They also tend to split one logical block into
+    ``*_top``, ``*_bottom``, ``*_side`` or renderer-specific textures.
+    """
+    candidate_token = _camel_to_snake(candidate.rsplit("/", 1)[-1]).lower()
+    texture_token = _camel_to_snake(texture_rel.rsplit("/", 1)[-1]).lower()
+    aliases = _candidate_aliases(candidate_token)
+    if texture_token in aliases:
+        return 100
+    for alias in aliases:
+        if texture_token.startswith(alias + "_"):
+            return 92
+
+    cwords = set(_preview_words(candidate_token))
+    twords = set(_preview_words(texture_token))
+    if not cwords or not twords:
+        return 0
+    decorative = {"top", "bottom", "side", "front", "back", "end", "open", "overlay", "fire", "log", "inside", "outside"}
+    structural_t = twords - decorative
+    if cwords == structural_t:
+        return 88
+    extras = twords - cwords
+    if cwords.issubset(twords) and len(cwords) >= 1 and extras.issubset(decorative):
+        return 80
+    return 0
+
+
+def _associate_preview_textures(
+    rel: str,
+    namespace: str,
+    textures: dict[tuple[str, str], list[str]],
+    provider_role: str,
+) -> list[str]:
+    """Find texture families for legacy/code-rendered blocks without executing them."""
+    allowed_namespaces = {namespace}
+    if provider_role == "backport_provider":
+        # Et Futurum is the motivating case: its legacy block registry is
+        # ``etfuturum:*`` but many faithful modern-vanilla textures live under
+        # ``assets/minecraft/textures/blocks``.
+        allowed_namespaces.add("minecraft")
+
+    scored: list[tuple[int, str]] = []
+    for (asset_ns, asset_rel), paths in textures.items():
+        if asset_ns not in allowed_namespaces:
+            continue
+        score = _texture_match_score(rel, asset_rel)
+        if score <= 0:
+            continue
+        for path in paths:
+            scored.append((score, path))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    # Keep a bounded family. Doors/barrels/campfires need several related
+    # textures, but broad fuzzy matches must not flood the catalog.
+    return [path for _score, path in scored[:12]]
+
+
 def _infer_model_kind(rel: str, model_paths: list[str], blockstate_path: str) -> str:
-    token = rel.lower()
+    token = _camel_to_snake(rel).lower()
+    if "campfire" in token:
+        return "campfire"
+    if token.endswith("_hanging_sign") or "hanging_sign" in token:
+        return "hanging_sign"
+    if token.endswith("_sign") or token.endswith("_wall_sign"):
+        return "sign"
+    if token.endswith("_door") or token.startswith("door_"):
+        return "door"
+    if token.endswith("_trapdoor") or token.startswith("trapdoor_"):
+        return "trapdoor"
+    if "lantern" in token and "sea_lantern" not in token:
+        return "lantern"
+    if token.endswith("_carpet"):
+        return "carpet"
     if any(x in token for x in ("sapling", "flower", "grass", "fern", "lichen", "roots", "vine", "seagrass", "kelp", "mushroom")):
         return "cross"
-    if token.endswith("_slab"):
+    if token.endswith("_slab") or token.startswith("slab_"):
         return "slab"
-    if token.endswith("_stairs"):
+    if token.endswith("_stairs") or token.startswith("stairs_"):
         return "stairs"
-    if token.endswith("_wall"):
+    if token.endswith("_wall") or token.startswith("wall_"):
         return "wall"
-    if token.endswith("_fence") or token.endswith("_fence_gate"):
+    if token.endswith("_fence") or token.endswith("_fence_gate") or token.startswith("fence_"):
         return "fence"
     if token.endswith("_pane") or "bars" in token:
         return "pane"
-    if token.endswith("_door") or token.endswith("_trapdoor"):
-        return "thin"
     if any(p.lower().endswith(".obj") for p in model_paths):
         return "obj"
     if any(p.lower().endswith(".json") for p in model_paths) or blockstate_path:
@@ -681,6 +763,11 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
         is_enum = rel in enum_fields and ns == primary_ns
         is_class_backed = is_static or is_enum
 
+        if is_class_backed and provider_role == "backport_provider":
+            for texture_path in _associate_preview_textures(rel, ns, textures, provider_role):
+                if texture_path not in tex_list:
+                    tex_list.append(texture_path)
+
         if bs:
             for model_ref in _blockstate_model_refs(zf, bs):
                 mp = _model_ref_to_path(model_ref, ns)
@@ -800,7 +887,7 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
     )
     notes.append("Display names prefer en_US, then other English locales, then non-English translations only as a final fallback.")
     notes.append(
-        "The desktop preview renders static packaged JSON geometry, OBJ geometry, or an isometric texture/model fallback. Runtime TESRs/BERs and code-generated models are not executed by the analyzer."
+        "The desktop preview uses texture-aware JSON geometry, UV-aware OBJ geometry, cross-namespace backport textures, and shape-aware legacy renderer approximations. Runtime TESRs/BERs and arbitrary mod code are never executed by the analyzer."
     )
     if provider_role == "backport_provider":
         notes.append("This catalog is classified as a backport provider. Exact same-name registered blocks can outrank approximate HBM/vanilla fallbacks when the target world registry confirms that block is actually enabled.")
@@ -883,9 +970,89 @@ def _resolve_json_model(zf: zipfile.ZipFile, model_path: str, max_depth: int = 1
     return {"textures": merged_textures, "elements": elements or [], "parent": parent}
 
 
-def _parse_obj_geometry(raw: bytes) -> tuple[list[list[float]], list[list[int]]]:
+def _texture_role_from_path(path: str) -> str:
+    stem = _camel_to_snake(PurePosixPath(path).stem).lower()
+    words = set(stem.split("_"))
+    if "campfire" in stem and "fire" in words:
+        return "fire"
+    if "campfire" in stem and "log" in words and "lit" in words:
+        return "log_lit"
+    if "campfire" in stem and "log" in words:
+        return "log"
+    if "door" in stem and stem.endswith("_top"):
+        return "door_top"
+    if "door" in stem and stem.endswith("_bottom"):
+        return "door_bottom"
+    if stem.endswith("_top_open"):
+        return "top_open"
+    for suffix, role in (
+        ("_top", "top"), ("_bottom", "bottom"), ("_side", "side"),
+        ("_front", "front"), ("_back", "back"), ("_end", "end"),
+        ("_overlay", "overlay"),
+    ):
+        if stem.endswith(suffix):
+            return role
+    return "all"
+
+
+def _texture_roles(paths: list[str]) -> dict[str, str]:
+    roles: dict[str, str] = {}
+    for path in paths:
+        role = _texture_role_from_path(path)
+        # Prefer the first/highest-scored analyzer association for each role.
+        roles.setdefault(role, path)
+    if paths and "all" not in roles:
+        roles["all"] = paths[0]
+    return roles
+
+
+def _resolve_texture_variable(value: str, textures: dict[str, str], max_depth: int = 12) -> str:
+    current = value
+    seen: set[str] = set()
+    for _ in range(max_depth):
+        if not current.startswith("#"):
+            return current
+        key = current[1:]
+        if key in seen:
+            break
+        seen.add(key)
+        current = str(textures.get(key) or "")
+        if not current:
+            break
+    return ""
+
+
+def _json_texture_bindings(
+    model_path: str,
+    resolved: dict[str, Any],
+    names: set[str],
+) -> dict[str, str]:
+    ns = model_path.split("/", 2)[1] if model_path.startswith("assets/") else "minecraft"
+    raw = resolved.get("textures") or {}
+    bindings: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return bindings
+    for key, value in raw.items():
+        if not isinstance(value, str):
+            continue
+        resolved_value = _resolve_texture_variable(value, raw)
+        if not resolved_value:
+            continue
+        if ":" in resolved_value:
+            tns, rel = resolved_value.split(":", 1)
+        else:
+            tns, rel = ns, resolved_value
+        path = f"assets/{tns}/textures/{rel}.png"
+        if path in names:
+            bindings[str(key)] = path
+    return bindings
+
+
+def _parse_obj_geometry(raw: bytes) -> tuple[list[list[float]], list[list[float]], list[dict[str, Any]]]:
+    """Parse bounded OBJ geometry including UV indexes for safe static previews."""
     vertices: list[list[float]] = []
-    faces: list[list[int]] = []
+    texcoords: list[list[float]] = []
+    faces: list[dict[str, Any]] = []
     for line in raw.decode("utf-8", "replace").splitlines():
         line = line.strip()
         if line.startswith("v "):
@@ -895,30 +1062,47 @@ def _parse_obj_geometry(raw: bytes) -> tuple[list[list[float]], list[list[int]]]
                     vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
                 except ValueError:
                     pass
-        elif line.startswith("f "):
-            indexes: list[int] = []
-            for part in line.split()[1:]:
+        elif line.startswith("vt "):
+            parts = line.split()
+            if len(parts) >= 3:
                 try:
-                    idx = int(part.split("/", 1)[0])
-                    if idx < 0:
-                        idx = len(vertices) + idx
-                    else:
-                        idx -= 1
-                    if 0 <= idx < len(vertices):
-                        indexes.append(idx)
+                    texcoords.append([float(parts[1]), float(parts[2])])
                 except ValueError:
+                    pass
+        elif line.startswith("f "):
+            vertex_indexes: list[int] = []
+            uv_indexes: list[int | None] = []
+            for part in line.split()[1:]:
+                fields = part.split("/")
+                try:
+                    idx = int(fields[0])
+                    idx = len(vertices) + idx if idx < 0 else idx - 1
+                except (ValueError, IndexError):
                     continue
-            if len(indexes) >= 3:
-                faces.append(indexes)
-    return vertices, faces
+                if not (0 <= idx < len(vertices)):
+                    continue
+                uv_idx: int | None = None
+                if len(fields) > 1 and fields[1]:
+                    try:
+                        parsed_uv = int(fields[1])
+                        parsed_uv = len(texcoords) + parsed_uv if parsed_uv < 0 else parsed_uv - 1
+                        if 0 <= parsed_uv < len(texcoords):
+                            uv_idx = parsed_uv
+                    except ValueError:
+                        pass
+                vertex_indexes.append(idx)
+                uv_indexes.append(uv_idx)
+            if len(vertex_indexes) >= 3:
+                faces.append({"vertices": vertex_indexes, "uvs": uv_indexes})
+    return vertices, texcoords, faces
 
 
 def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
-    """Build a safe static preview description for one analyzer row.
+    """Build a safe, texture-aware static preview description for one row.
 
-    The returned data is Qt-independent and intentionally bounded. It supports
-    ordinary block JSON, packaged OBJ geometry, and shape-aware isometric
-    fallbacks. Custom runtime renderers are represented rather than executed.
+    No mod code is loaded or executed. The spec preserves enough material data
+    for the Qt side to render recognizable legacy blocks, full two-block doors,
+    custom campfire geometry, JSON elements and UV-mapped OBJ models.
     """
     if hasattr(candidate, "__dict__"):
         data = dict(candidate.__dict__)
@@ -946,17 +1130,10 @@ def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
         obj_model = next((m for m in models if m.lower().endswith(".obj") and m in names), "")
         if json_model:
             resolved = _resolve_json_model(zf, json_model)
-            ns = json_model.split("/", 2)[1]
-            for value in resolved.get("textures", {}).values():
-                if not isinstance(value, str) or value.startswith("#"):
-                    continue
-                if ":" in value:
-                    tns, rel = value.split(":", 1)
-                else:
-                    tns, rel = ns, value
-                tp = f"assets/{tns}/textures/{rel}.png"
-                if tp in names and tp not in textures:
-                    textures.append(tp)
+            bindings = _json_texture_bindings(json_model, resolved, names)
+            for path in bindings.values():
+                if path not in textures:
+                    textures.append(path)
             parent = str(resolved.get("parent") or "").lower()
             shape = model_kind or "json"
             if "cross" in parent:
@@ -978,31 +1155,41 @@ def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
                 "registry": registry,
                 "model_path": json_model,
                 "texture_paths": textures,
+                "texture_roles": _texture_roles(textures),
+                "texture_bindings": bindings,
                 "elements": resolved.get("elements") or [],
                 "parent": resolved.get("parent") or "",
-                "note": "Static JSON model preview",
+                "note": "Texture-aware static JSON model preview",
             }
 
         if obj_model:
-            vertices, faces = _parse_obj_geometry(zf.read(obj_model))
+            vertices, texcoords, faces = _parse_obj_geometry(zf.read(obj_model))
             if vertices and faces:
                 return {
                     "kind": "obj",
                     "registry": registry,
                     "model_path": obj_model,
                     "texture_paths": textures,
+                    "texture_roles": _texture_roles(textures),
                     "vertices": vertices,
+                    "texcoords": texcoords,
                     "faces": faces,
-                    "note": "Static OBJ geometry preview",
+                    "note": "UV-mapped static OBJ geometry preview" if texcoords else "Static OBJ geometry preview (no UV coordinates packaged)",
                 }
 
     shape = model_kind or "cube"
     if shape in {"json", "legacy_model", "obj", ""}:
         shape = "cube" if textures else "asset"
+    note = "Shape-aware static asset preview" if textures or models else "No packaged static model/texture was linked"
+    if shape == "door" and textures:
+        note = "Synthesized full two-block door preview from packaged top/bottom textures"
+    elif shape == "campfire" and textures:
+        note = "Synthesized campfire preview from packaged legacy renderer textures"
     return {
         "kind": shape,
         "registry": registry,
         "model_path": models[0] if models else "",
         "texture_paths": textures,
-        "note": "Shape-aware static asset preview" if textures or models else "No packaged static model/texture was linked",
+        "texture_roles": _texture_roles(textures),
+        "note": note,
     }
