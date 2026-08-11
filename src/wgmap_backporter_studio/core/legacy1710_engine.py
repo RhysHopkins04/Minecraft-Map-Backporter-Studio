@@ -368,7 +368,10 @@ class TargetRegistry:
         self._lower={k.lower():v for k,v in self.ids.items()}
         self._aliases_lower={str(k).lower():str(v) for k,v in self.aliases.items()}
         self._hbm_by_logical={}
+        self._namespace_counts=collections.Counter()
         for k,v in self.ids.items():
+            namespace=k.split(":",1)[0].lower() if ":" in k else "minecraft"
+            self._namespace_counts[namespace]+=1
             if k.lower().startswith("hbm:"):
                 suffix=k.split(":",1)[1]
                 logical=suffix[5:] if suffix.startswith("tile.") else suffix
@@ -397,6 +400,9 @@ class TargetRegistry:
     @property
     def hbm_count(self):
         return len(self._hbm_by_logical)
+
+    def namespace_count(self, namespace):
+        return int(self._namespace_counts.get(str(namespace).strip().lower(),0))
 
     def summary(self):
         ignored=("; %d item entries ignored" % self.ignored_items) if self.ignored_items else ""
@@ -510,10 +516,23 @@ def validate_target_registry(
             % (len(mapping_profile.enabled_catalogs), enabled)
         )
         if mapping_profile.backport_targets:
+            provider_namespaces=mapping_profile.to_dict().get("backport_provider_namespaces") or []
             log(
                 "Backport providers: %d exact-name target candidate(s) across %s"
-                % (len(mapping_profile.backport_targets), ", ".join(mapping_profile.to_dict().get("backport_provider_namespaces") or []) or "none")
+                % (len(mapping_profile.backport_targets), ", ".join(provider_namespaces) or "none")
             )
+            provider_counts={ns:reg.namespace_count(ns) for ns in provider_namespaces}
+            available_targets={target.target_name for target in mapping_profile.backport_targets if reg.resolve(target.target_name) is not None}
+            log(
+                "Target registry provider coverage: %s; %d/%d catalog target name(s) are actually registered."
+                % (
+                    ", ".join("%s=%d"%(ns,provider_counts[ns]) for ns in provider_namespaces) or "none",
+                    len(available_targets), len({target.target_name for target in mapping_profile.backport_targets}),
+                )
+            )
+            for ns,count in provider_counts.items():
+                if count == 0:
+                    log("WARNING: backport provider %s is enabled in Catalog Workspace but has no registered blocks in the selected target/template world."%ns)
         if mapping_profile.allow_safe_mod_replacements and not mapping_profile.enabled_mod_ids:
             log("NOTICE: safe mod replacements are enabled, but no Catalog Workspace sources are enabled; vanilla fallbacks will be used.")
         if mapping_profile.allows_namespace("hbm") and reg.hbm_count == 0:
@@ -521,9 +540,20 @@ def validate_target_registry(
     elif use_hbm and reg.hbm_count == 0:
         log("WARNING: safe mod architectural replacements are enabled, but the target registry contains no HBM block entries; vanilla fallbacks will be used.")
 
+    provider_namespaces=[]
+    provider_target_total=0
+    provider_target_registered=0
+    if mapping_profile is not None and mapping_profile.catalog_bound:
+        provider_namespaces=mapping_profile.to_dict().get("backport_provider_namespaces") or []
+        provider_targets={target.target_name for target in mapping_profile.backport_targets}
+        provider_target_total=len(provider_targets)
+        provider_target_registered=sum(1 for target in provider_targets if reg.resolve(target) is not None)
     return {
         "source_format":reg.source_format, "block_ids":len(reg.ids), "raw_entries":reg.raw_entries,
         "ignored_item_entries":reg.ignored_items, "hbm_entries":reg.hbm_count,
+        "provider_namespace_entries":{ns:reg.namespace_count(ns) for ns in provider_namespaces},
+        "backport_provider_targets_catalog":provider_target_total,
+        "backport_provider_targets_registered":provider_target_registered,
     }
 
 
@@ -556,7 +586,9 @@ def door_meta(props):
     return m
 
 def trapdoor_meta(props):
-    m={"south":0,"north":1,"east":2,"west":3}.get(props.get("facing"),0)
+    # 1.7.10 BlockTrapDoor metadata uses north=0, south=1, west=2, east=3.
+    # The previous table inverted both axes, rotating/mirroring imported trapdoors.
+    m={"north":0,"south":1,"west":2,"east":3}.get(props.get("facing"),0)
     if boolprop(props,"open"): m|=4
     if props.get("half") == "top": m|=8
     return m
@@ -1061,6 +1093,7 @@ def preflight_source_mappings(
     unresolved={}; parse_failures=[]; mapped_targets=collections.Counter()
     mapping_quality=collections.defaultdict(set); mod_targets=collections.Counter()
     mapping_cache={}; mapping_impact=collections.Counter(); quality_occurrences=collections.Counter()
+    unavailable_provider_impact=collections.Counter()
     source_occurrences=collections.Counter(); block_occurrences_total=0
     crop_high_chunks=0; crop_low_chunks=0
     block_entity_types=collections.Counter()
@@ -1126,6 +1159,15 @@ def preflight_source_mappings(
                                     source_occurrences[str(name)]+=count
                                     quality_occurrences[mapping.quality]+=count
                                     mapping_impact[(str(name),str(resolved),str(mapping.quality),str(mapping.note or ""))]+=count
+                                    if mapping_profile is not None and mapping_profile.allow_safe_mod_replacements and mapping.quality not in {"backport_exact","backport_close"}:
+                                        source_name=str(name)
+                                        vanilla_name=source_name if ":" in source_name else "minecraft:"+source_name
+                                        if vanilla_name.lower().startswith("minecraft:") and reg.resolve(vanilla_name) is None:
+                                            candidates=[c for c in mapping_profile.backport_candidates(vanilla_name) if mapping_profile.allows_namespace(c.target_name.split(":",1)[0] if ":" in c.target_name else "")]
+                                            if candidates and not any(reg.resolve(c.target_name) is not None for c in candidates):
+                                                targets=" | ".join(c.target_name for c in candidates)
+                                                providers=" | ".join(c.provider or c.target_name.split(":",1)[0] for c in candidates)
+                                                unavailable_provider_impact[(source_name,targets,providers)]+=count
                     if chunk_high: crop_high_chunks+=1
                     if chunk_low: crop_low_chunks+=1
                 except Exception as exc:
@@ -1163,6 +1205,10 @@ def preflight_source_mappings(
         })
         if len(impact_rows)>=40:
             break
+    unavailable_provider_rows=[
+        {"source":source,"candidate_targets":targets.split(" | "),"providers":providers.split(" | "),"count":int(count)}
+        for (source,targets,providers),count in unavailable_provider_impact.most_common(40)
+    ]
     quality_percent={
         quality:(100.0*int(count)/block_occurrences_total if block_occurrences_total else 0.0)
         for quality,count in quality_occurrences.items()
@@ -1198,6 +1244,7 @@ def preflight_source_mappings(
         "mapping_quality_block_occurrences":dict(quality_occurrences),
         "mapping_quality_percent":quality_percent,
         "top_non_exact_mappings":impact_rows,
+        "unavailable_backport_candidates":unavailable_provider_rows,
         "top_source_block_occurrences":[
             {"source":name,"count":int(count)} for name,count in source_occurrences.most_common(40)
         ],
@@ -1227,6 +1274,12 @@ def preflight_source_mappings(
         if impact_rows:
             sample=", ".join("%s -> %s (%s, %d)"%(row["source"],row["target"],row["quality"],row["count"]) for row in impact_rows[:8])
             log("Highest-impact non-exact mappings: "+sample)
+        if unavailable_provider_rows:
+            sample=", ".join(
+                "%s -> %s absent from target registry (%d)"%(row["source"],"/".join(row["candidate_targets"]),row["count"])
+                for row in unavailable_provider_rows[:8]
+            )
+            log("Backport candidates present in catalogs but unavailable in the selected template: "+sample)
     return info
 
 # ---------- Legacy NBT writer ----------
@@ -1899,6 +1952,15 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
                     lines.append("- %d × %s -> %s [%s]%s"%(
                         int(row.get("count",0) or 0), row.get("source","?"), row.get("target","?"),
                         row.get("quality","?"), (" — "+str(row.get("note"))) if row.get("note") else ""
+                    ))
+            unavailable=preflight.get("unavailable_backport_candidates") or []
+            if unavailable:
+                lines += ["", "Backport-provider candidates unavailable in target/template registry:"]
+                for row in unavailable[:25]:
+                    lines.append("- %d × %s: catalog candidate(s) %s not registered in target world%s"%(
+                        int(row.get("count",0) or 0), row.get("source","?"),
+                        ", ".join(row.get("candidate_targets") or []),
+                        (" (provider: "+", ".join(row.get("providers") or [])+")") if row.get("providers") else ""
                     ))
             lines += [""]
         lines += ["Approximate/omitted modern blocks:"]

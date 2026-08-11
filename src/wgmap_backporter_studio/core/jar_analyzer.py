@@ -15,6 +15,7 @@ from .catalog import BlockAsset, BlockEntityAsset, ModCatalog
 
 
 _TEXTURE_RE = re.compile(r"^assets/([^/]+)/textures/(?:block|blocks)/(.+)\.png$", re.I)
+_ANY_TEXTURE_RE = re.compile(r"^assets/([^/]+)/textures/(.+)\.png$", re.I)
 _MODEL_RE = re.compile(r"^assets/([^/]+)/models/(?:block|blocks)/(.+)\.json$", re.I)
 _ANY_MODEL_RE = re.compile(r"^assets/([^/]+)/models/(.+)\.(json|obj|dae|hmf|tcn)$", re.I)
 _BLOCKSTATE_RE = re.compile(r"^assets/([^/]+)/blockstates/(.+)\.json$", re.I)
@@ -509,6 +510,76 @@ def _associate_preview_textures(
     return [path for _score, path in scored[:12]]
 
 
+
+
+def _ordered_unique(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        value = str(value)
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _associate_model_textures(model_paths: Iterable[str], texture_paths: Iterable[str]) -> list[str]:
+    """Link packaged model geometry to its most likely dedicated textures.
+
+    Legacy mods such as HBM often keep OBJ/DAE geometry under ``models/...``
+    while the bound textures live under ``textures/models/...``. Restricting
+    analysis to ``textures/blocks`` made a correct model render with the wrong
+    block icon or with no texture at all. This matcher is deterministic and
+    path-first; fuzzy stem matching is only a bounded final fallback.
+    """
+    textures = _ordered_unique(texture_paths)
+    texture_set = set(textures)
+    out: list[str] = []
+    for model_path in model_paths:
+        before = len(out)
+        match = _ANY_MODEL_RE.match(str(model_path))
+        if not match:
+            continue
+        ns = match.group(1)
+        rel = match.group(2)
+        stem = PurePosixPath(rel).name
+        candidates = [
+            f"assets/{ns}/textures/models/{rel}.png",
+            f"assets/{ns}/textures/{rel}.png",
+            f"assets/{ns}/textures/blocks/{stem}.png",
+            f"assets/{ns}/textures/block/{stem}.png",
+        ]
+        for candidate in candidates:
+            if candidate in texture_set and candidate not in out:
+                out.append(candidate)
+
+        if len(out) > before:
+            continue
+
+        # Bounded same-namespace fallback. Prefer exact basename and then a
+        # shared directory suffix; never cross namespaces for custom models.
+        scored: list[tuple[int, str]] = []
+        model_words = set(_preview_words(rel))
+        for texture_path in textures:
+            tm = _ANY_TEXTURE_RE.match(texture_path)
+            if not tm or tm.group(1) != ns:
+                continue
+            texture_rel = tm.group(2)
+            texture_stem = PurePosixPath(texture_rel).name
+            score = 0
+            if _camel_to_snake(texture_stem) == _camel_to_snake(stem):
+                score += 100
+            shared = model_words & set(_preview_words(texture_rel))
+            score += len(shared) * 8
+            if rel.rsplit('/', 1)[0] and rel.rsplit('/', 1)[0] in texture_rel:
+                score += 20
+            if score >= 24:
+                scored.append((score, texture_path))
+        for _score, texture_path in sorted(scored, key=lambda item: (-item[0], item[1]))[:4]:
+            if texture_path not in out:
+                out.append(texture_path)
+    return out
+
 def _infer_model_kind(rel: str, model_paths: list[str], blockstate_path: str) -> str:
     token = _camel_to_snake(rel).lower()
     if "campfire" in token:
@@ -705,12 +776,16 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
 
     display_names, display_locales, locales_found = _lang_names(zf, names)
     textures: dict[tuple[str, str], list[str]] = defaultdict(list)
+    all_texture_assets: list[str] = []
     modern_models: dict[tuple[str, str], list[str]] = defaultdict(list)
     all_models_by_stem: dict[tuple[str, str], list[str]] = defaultdict(list)
     blockstates: dict[tuple[str, str], str] = {}
     all_model_assets: list[str] = []
 
     for name in names:
+        any_texture = _ANY_TEXTURE_RE.match(name)
+        if any_texture:
+            all_texture_assets.append(name)
         m = _TEXTURE_RE.match(name)
         if m:
             textures[(m.group(1), m.group(2))].append(name)
@@ -815,13 +890,19 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
                     if ref in name_set and ref not in tex_list:
                         tex_list.append(ref)
 
+        # Custom legacy models frequently bind textures from textures/models
+        # rather than textures/blocks. Put the dedicated model texture first so
+        # the preview does not paint an OBJ with an unrelated inventory icon.
+        model_textures = _associate_model_textures(model_list, all_texture_assets)
+        tex_list = _ordered_unique(model_textures + tex_list)
+
         display = display_names.get((ns, rel), "")
         locale_used = display_locales.get((ns, rel), "")
         if not display:
             display = rel.replace("_", " ").replace("/", " / ").title()
 
-        model_list = sorted(set(model_list))
-        tex_list = sorted(set(tex_list))
+        model_list = _ordered_unique(sorted(set(model_list)))
+        tex_list = _ordered_unique(tex_list)
         blocks.append(BlockAsset(
             namespace=ns,
             registry_hint=f"{ns}:{rel}",
@@ -854,6 +935,8 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
         for (ns, rel), paths in textures.items():
             if ns == primary_ns and _normalized_asset_token(rel) == token:
                 texture_matches.extend(paths)
+        model_texture_matches = _associate_model_textures(model_matches, all_texture_assets)
+        texture_matches = _ordered_unique(model_texture_matches + texture_matches)
         display = re.sub(r"(?<!^)(?=[A-Z])", " ", simple)
         display = re.sub(r"^(Tile Entity|Block Entity)\s*", "", display, flags=re.I).strip() or simple
         block_entities.append(BlockEntityAsset(
@@ -863,8 +946,8 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
             display_name=display,
             confidence="high" if (model_matches or texture_matches) else "medium",
             evidence="packaged TileEntity/BlockEntity subclass" + (" + matching static model asset" if model_matches else ""),
-            texture_paths=sorted(set(texture_matches)),
-            model_paths=sorted(set(model_matches)),
+            texture_paths=_ordered_unique(texture_matches),
+            model_paths=_ordered_unique(sorted(set(model_matches))),
             source_mod=(mod_ids[0] if mod_ids else primary_ns),
             source_file=source_label,
         ))
@@ -894,6 +977,7 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
 
     analysis_stats = {
         "packaged_block_textures": sum(len(v) for v in textures.values()),
+        "packaged_texture_assets": len(all_texture_assets),
         "packaged_model_assets": len(all_model_assets),
         "associated_model_assets": len(associated_model_assets),
         "legacy_static_block_fields": len(static_fields),
@@ -1116,6 +1200,8 @@ def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
     blockstate = str(data.get("blockstate_path") or "")
     registry = str(data.get("registry_hint") or data.get("class_name") or "")
     model_kind = str(data.get("model_kind") or "")
+    candidate_kind = str(data.get("candidate_kind") or "").lower()
+    is_block_entity = "block entity" in candidate_kind or "tileentity" in candidate_kind
 
     with zipfile.ZipFile(jar_path, "r") as zf:
         names = set(zf.namelist())
@@ -1128,6 +1214,9 @@ def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
 
         json_model = next((m for m in models if m.lower().endswith(".json") and m in names), "")
         obj_model = next((m for m in models if m.lower().endswith(".obj") and m in names), "")
+        all_texture_paths = [name for name in names if _ANY_TEXTURE_RE.match(name)]
+        model_texture_paths = _associate_model_textures([m for m in (json_model, obj_model) if m], all_texture_paths)
+        textures = _ordered_unique(model_texture_paths + textures)
         if json_model:
             resolved = _resolve_json_model(zf, json_model)
             bindings = _json_texture_bindings(json_model, resolved, names)
@@ -1174,13 +1263,31 @@ def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
                     "vertices": vertices,
                     "texcoords": texcoords,
                     "faces": faces,
-                    "note": "UV-mapped static OBJ geometry preview" if texcoords else "Static OBJ geometry preview (no UV coordinates packaged)",
+                    "note": (
+                        "UV-mapped static OBJ geometry preview" if texcoords and textures else
+                        "Static OBJ geometry has packaged UV coordinates but no linked texture asset" if texcoords else
+                        "Static OBJ geometry preview (no UV coordinates packaged)"
+                    ),
                 }
 
     shape = model_kind or "cube"
-    if shape in {"json", "legacy_model", "obj", ""}:
+    if is_block_entity:
+        # A TileEntity/BlockEntity does not imply cube geometry. If its packaged
+        # static model is a format we do not parse (DAE/HMF/TCN/etc.), or if it
+        # is rendered entirely by a TESR/BER, show a truthful 2D asset card (or
+        # an explicit unresolved message) rather than inventing a solid cube.
+        shape = "texture_card" if textures else "runtime_unresolved"
+    elif shape in {"json", "legacy_model", "obj", ""}:
         shape = "cube" if textures else "asset"
-    note = "Shape-aware static asset preview" if textures or models else "No packaged static model/texture was linked"
+    if is_block_entity and shape == "texture_card":
+        if models:
+            note = "Packaged block-entity model is not a supported static JSON/OBJ preview; showing the linked texture/icon without inventing runtime geometry"
+        else:
+            note = "Runtime block-entity renderer has no packaged static geometry; showing the linked texture/icon without inventing a cube"
+    elif is_block_entity and shape == "runtime_unresolved":
+        note = "Runtime block-entity renderer could not be reconstructed safely from packaged static assets"
+    else:
+        note = "Shape-aware static asset preview" if textures or models else "No packaged static model/texture was linked"
     if shape == "door" and textures:
         note = "Synthesized full two-block door preview from packaged top/bottom textures"
     elif shape == "campfire" and textures:

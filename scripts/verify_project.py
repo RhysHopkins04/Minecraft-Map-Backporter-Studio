@@ -401,7 +401,14 @@ for token in [
     'assert door_spec["kind"] == "door"',
     'assert campfire_spec["kind"] == "campfire"',
     'assert be_spec["kind"] == "obj"',
+    'assert be_spec["texture_paths"][0] == "assets/etfuturum/textures/models/trinkets/fancy_sign.png"',
     'assert "UV-mapped" in be_spec["note"]',
+    'def test_runtime_only_preview_is_not_invented_as_cube():',
+    'assert card["kind"] == "texture_card"',
+    'assert unresolved["kind"] == "runtime_unresolved"',
+    'def test_legacy_directional_metadata_and_provider_registry_diagnostics():',
+    'assert legacy1710_engine.trapdoor_meta({"facing": "north", "half": "bottom", "open": "false"}) == 0',
+    'assert legacy1710_engine.door_meta({"half": "upper", "hinge": "right", "powered": "true"}) == 11',
 ]:
     if token not in test_smoke:
         error(f"Analyzer/provider/preview regression test missing: {token}")
@@ -413,6 +420,11 @@ for token in [
     'Preflight mapping impact by placed blocks:',
     'Mapping impact by placed in-range non-air blocks:',
     'quality="backport_exact" if state_exact else "backport_close"',
+    '"unavailable_backport_candidates":unavailable_provider_rows',
+    'Target registry provider coverage:',
+    'Backport candidates present in catalogs but unavailable in the selected template:',
+    '"provider_namespace_entries":{ns:reg.namespace_count(ns)',
+    'm={"north":0,"south":1,"west":2,"east":3}.get(props.get("facing"),0)',
 ]:
     if token not in legacy:
         error(f"Patch 015 mapping-impact/provider invariant missing: {token}")
@@ -545,9 +557,13 @@ for token in [
     'Texture-aware static JSON model preview',
     'UV-mapped static OBJ geometry preview',
     'def _associate_preview_textures(',
+    'def _associate_model_textures(',
+    'textures/models/',
     'assets/minecraft',
     'Synthesized full two-block door preview',
     'Synthesized campfire preview',
+    'shape = "texture_card" if textures else "runtime_unresolved"',
+    'shape == "runtime_unresolved"',
     'backport_provider',
     'architectural_fallback',
     'mapping_aliases=_candidate_aliases(rel)',
@@ -560,15 +576,21 @@ for token in [
     'def _preview_images(',
     'image.convertToFormat(QImage.Format.Format_RGBA8888)',
     'path + ".mcmeta" in names',
+    'def _affine_coefficients(',
+    'def _draw_affine_image_triangle(',
+    'QTransform(*coeffs)',
     'def _draw_textured_quad(',
-    'painter.drawImage(bounds, image, QRectF(image.rect()))',
     'def _draw_uv_triangle(',
     'elif kind == "door":',
     'elif kind == "campfire":',
     'elif kind == "lantern":',
+    'elif kind == "texture_card":',
+    'message = "Runtime renderer\\nnot statically reconstructable"',
+    'provider targets registered',
+    'catalog backport target(s) are actually registered in the selected template',
 ]:
     if token not in main_window:
-        error(f"Patch 016 high-fidelity static preview invariant missing: {token}")
+        error(f"Patch 017 faithful static preview invariant missing: {token}")
 
 
 catalog_model_path = root / "src/wgmap_backporter_studio/core/catalog.py"

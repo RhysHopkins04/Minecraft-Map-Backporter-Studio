@@ -182,12 +182,12 @@ def make_enum_backport_jar(path: Path):
         z.writestr("assets/etfuturum/blockstates/moss_block.json", json.dumps({
             "variants": {"normal": {"model": "etfuturum:block/moss_block"}}
         }))
-        z.writestr("assets/etfuturum/models/blocks/fancy_sign.obj", "\n".join([
+        z.writestr("assets/etfuturum/models/trinkets/fancy_sign.obj", "\n".join([
             "v 0 0 0", "v 1 0 0", "v 0 1 0",
             "vt 0 0", "vt 1 0", "vt 0 1",
             "f 1/1 2/2 3/3",
         ]))
-        z.writestr("assets/etfuturum/textures/blocks/fancy_sign.png", png)
+        z.writestr("assets/etfuturum/textures/models/trinkets/fancy_sign.png", png)
         z.writestr("future/ModBlocks.class", _minimal_enum_block_registry_class())
         z.writestr("future/TileEntityFancySign.class", _minimal_tile_entity_class())
 
@@ -335,6 +335,76 @@ def test_backport_provider_mapping_profile():
     assert stone.target == "minecraft:stone"
 
 
+
+def test_legacy_directional_metadata_and_provider_registry_diagnostics():
+    # 1.7.10 trapdoor metadata is north=0, south=1, west=2, east=3.
+    assert legacy1710_engine.trapdoor_meta({"facing": "north", "half": "bottom", "open": "false"}) == 0
+    assert legacy1710_engine.trapdoor_meta({"facing": "south", "half": "bottom", "open": "false"}) == 1
+    assert legacy1710_engine.trapdoor_meta({"facing": "west", "half": "bottom", "open": "false"}) == 2
+    assert legacy1710_engine.trapdoor_meta({"facing": "east", "half": "bottom", "open": "false"}) == 3
+    assert legacy1710_engine.trapdoor_meta({"facing": "east", "half": "top", "open": "true"}) == 15
+
+    # Door facing already matched the 1.7.10 encoding; lock that in while also
+    # checking lower open state and independent upper hinge/powered state.
+    assert legacy1710_engine.door_meta({"half": "lower", "facing": "east", "open": "false"}) == 0
+    assert legacy1710_engine.door_meta({"half": "lower", "facing": "south", "open": "false"}) == 1
+    assert legacy1710_engine.door_meta({"half": "lower", "facing": "west", "open": "false"}) == 2
+    assert legacy1710_engine.door_meta({"half": "lower", "facing": "north", "open": "true"}) == 7
+    assert legacy1710_engine.door_meta({"half": "upper", "hinge": "left", "powered": "false"}) == 8
+    assert legacy1710_engine.door_meta({"half": "upper", "hinge": "right", "powered": "true"}) == 11
+
+    snapshot = {
+        "enabled_catalogs": ["Et Futurum Requiem"],
+        "enabled_mod_ids": ["etfuturum"],
+        "registry_hints": ["etfuturum:moss_block"],
+        "candidate_count": 1,
+        "backport_providers": [{
+            "label": "Et Futurum Requiem",
+            "blocks": [{
+                "registry_hint": "etfuturum:moss_block",
+                "confidence": "high",
+                "candidate_kind": "registered block candidate",
+                "mapping_aliases": ["moss_block"],
+            }],
+        }],
+    }
+    profile = profile_from_catalog_snapshot(snapshot, True)
+    missing = legacy1710_engine.TargetRegistry({
+        "minecraft:air": 0, "minecraft:stone": 1, "minecraft:grass": 2,
+        "minecraft:dirt": 3, "minecraft:cobblestone": 4, "minecraft:planks": 5,
+        "minecraft:bedrock": 7, "minecraft:water": 9,
+    })
+    logs = []
+    summary = legacy1710_engine.validate_target_registry(missing, True, logs.append, profile)
+    assert summary["provider_namespace_entries"]["etfuturum"] == 0
+    assert summary["backport_provider_targets_catalog"] == 1
+    assert summary["backport_provider_targets_registered"] == 0
+    assert any("etfuturum=0" in line for line in logs)
+    assert any("has no registered blocks" in line for line in logs)
+
+
+def test_runtime_only_preview_is_not_invented_as_cube():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        jar = td / "runtime-only.jar"
+        png = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360f8cfc0000004010100c9fe92ef0000000049454e44ae426082")
+        with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("assets/demo/textures/blocks/runtime_icon.png", png)
+        card = build_preview_spec(jar, {
+            "candidate_kind": "block entity",
+            "class_name": "demo.TileEntityRuntime",
+            "texture_paths": ["assets/demo/textures/blocks/runtime_icon.png"],
+            "model_paths": [],
+        })
+        assert card["kind"] == "texture_card"
+        unresolved = build_preview_spec(jar, {
+            "candidate_kind": "block entity",
+            "class_name": "demo.TileEntityInvisibleRuntime",
+            "texture_paths": [],
+            "model_paths": [],
+        })
+        assert unresolved["kind"] == "runtime_unresolved"
+
 def _nbt_string_payload(value: str) -> bytes:
     return legacy1710_engine.nbt_name(value)
 
@@ -420,6 +490,7 @@ def test_cross_generation_jar_analysis_and_preview():
 
         be_spec = build_preview_spec(jar, cat.block_entities[0])
         assert be_spec["kind"] == "obj"
+        assert be_spec["texture_paths"][0] == "assets/etfuturum/textures/models/trinkets/fancy_sign.png"
         assert be_spec["texcoords"] and be_spec["faces"][0]["uvs"] == [0, 1, 2]
         assert "UV-mapped" in be_spec["note"]
 
@@ -496,6 +567,8 @@ def main():
     test_forge1710_itemdata_registry()
     test_catalog_bound_mapping_profile()
     test_backport_provider_mapping_profile()
+    test_legacy_directional_metadata_and_provider_registry_diagnostics()
+    test_runtime_only_preview_is_not_invented_as_cube()
     test_content_audit_and_legacy_roundtrip()
     test_cross_generation_jar_analysis_and_preview()
     test_staged_output_promotion()

@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QThread, Qt, Signal, Slot, QStandardPaths, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QDesktopServices, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -127,6 +127,54 @@ def _texture_path_for_role(roles: dict[str, str], role: str) -> str:
     return roles.get("all", "")
 
 
+def _affine_coefficients(src, dst):
+    """Return an affine map from three source points to three destination points.
+
+    The result follows Qt's QTransform constructor order:
+    (m11, m12, m21, m22, dx, dy). Keeping the math separate makes the
+    texture projection deterministic and avoids the triangle/mosaic artefacts
+    from the old sampled micro-mesh renderer.
+    """
+    (x0,y0),(x1,y1),(x2,y2)=src
+    (X0,Y0),(X1,Y1),(X2,Y2)=dst
+    det=x0*(y1-y2)+x1*(y2-y0)+x2*(y0-y1)
+    if abs(det) < 1e-9:
+        return None
+    a=(X0*(y1-y2)+X1*(y2-y0)+X2*(y0-y1))/det
+    b=(X0*(x2-x1)+X1*(x0-x2)+X2*(x1-x0))/det
+    c=(X0*(x1*y2-x2*y1)+X1*(x2*y0-x0*y2)+X2*(x0*y1-x1*y0))/det
+    d=(Y0*(y1-y2)+Y1*(y2-y0)+Y2*(y0-y1))/det
+    e=(Y0*(x2-x1)+Y1*(x0-x2)+Y2*(x1-x0))/det
+    f=(Y0*(x1*y2-x2*y1)+Y1*(x2*y0-x0*y2)+Y2*(x0*y1-x1*y0))/det
+    return (a,d,b,e,c,f)
+
+
+def _draw_affine_image_triangle(
+    painter: QPainter,
+    points: list[QPointF],
+    source_points: list[tuple[float,float]],
+    image: QImage,
+    opacity: float = 1.0,
+) -> bool:
+    if len(points) != 3 or len(source_points) != 3 or image.isNull():
+        return False
+    dst=[(p.x(),p.y()) for p in points]
+    coeffs=_affine_coefficients(source_points,dst)
+    if coeffs is None:
+        return False
+    transform=QTransform(*coeffs)
+    painter.save()
+    painter.setOpacity(opacity)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+    painter.setTransform(transform, False)
+    clip=QPainterPath()
+    clip.addPolygon(QPolygonF([QPointF(x,y) for x,y in source_points]))
+    painter.setClipPath(clip)
+    painter.drawImage(QPointF(0,0), image)
+    painter.restore()
+    return True
+
+
 def _draw_textured_quad(
     painter: QPainter,
     points: list[QPointF],
@@ -139,28 +187,35 @@ def _draw_textured_quad(
     polygon = QPolygonF(points)
     painter.save()
     painter.setOpacity(opacity)
-    if image is not None and not image.isNull():
-        path = QPainterPath()
-        path.addPolygon(polygon)
-        painter.setClipPath(path)
-        bounds = polygon.boundingRect()
-        # Nearest-neighbour scaling keeps Minecraft pixel art crisp. Clipping a
-        # face-sized image is intentionally preferable to QBrush texture tiling,
-        # which caused the pre-Patch-016 "texture soup" screenshots.
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
-        painter.drawImage(bounds, image, QRectF(image.rect()))
-        if shade:
-            overlay = QColor(0, 0, 0, max(0, min(180, shade)))
-            painter.fillPath(path, overlay)
-    else:
+    painted=False
+    if image is not None and not image.isNull() and len(points) >= 4:
+        w=max(1,image.width()); h=max(1,image.height())
+        # Geometry vertices are ordered bottom-left, bottom-right, top-right,
+        # top-left. Two affine triangles map the full pixel-art texture onto the
+        # projected face without painting into an axis-aligned bounding box.
+        src=[(0.0,float(h)),(float(w),float(h)),(float(w),0.0),(0.0,0.0)]
+        painted |= _draw_affine_image_triangle(painter,[points[0],points[1],points[2]],[src[0],src[1],src[2]],image,opacity)
+        painted |= _draw_affine_image_triangle(painter,[points[0],points[2],points[3]],[src[0],src[2],src[3]],image,opacity)
+    elif image is not None and not image.isNull() and len(points) == 3:
+        w=max(1,image.width()); h=max(1,image.height())
+        painted = _draw_affine_image_triangle(
+            painter, points[:3], [(0.0,float(h)),(float(w),float(h)),(0.0,0.0)], image, opacity
+        )
+    if not painted:
         painter.setBrush(QColor("#68798a"))
+        painter.setPen(Qt.NoPen)
         painter.drawPolygon(polygon)
     painter.restore()
+
+    if shade:
+        painter.save()
+        overlay=QPainterPath(); overlay.addPolygon(polygon)
+        painter.fillPath(overlay,QColor(0,0,0,max(0,min(180,shade))))
+        painter.restore()
     painter.setOpacity(1.0)
     painter.setPen(QPen(QColor(90, 110, 130, 150), 1))
     painter.setBrush(Qt.NoBrush)
     painter.drawPolygon(polygon)
-
 
 def _box_visible_faces(bounds) -> list[tuple[str, list[tuple[float, float, float]], int]]:
     x0, y0, z0, x1, y1, z1 = [float(v) for v in bounds]
@@ -179,54 +234,20 @@ def _draw_box(painter, bounds, transform, images, roles, role_override: str = ""
         _draw_textured_quad(painter, [_project_iso(v, transform) for v in verts], image, shade=shade)
 
 
-def _sample_texture(image: QImage, uv: tuple[float, float], shade: float = 1.0) -> QColor:
-    if image.isNull() or image.width() <= 0 or image.height() <= 0:
-        return QColor("#68798a")
-    u = max(0.0, min(1.0, uv[0]))
-    v = max(0.0, min(1.0, uv[1]))
-    x = min(image.width() - 1, int(u * image.width()))
-    y = min(image.height() - 1, int((1.0 - v) * image.height()))
-    c = image.pixelColor(x, y)
-    return QColor(
-        max(0, min(255, int(c.red() * shade))),
-        max(0, min(255, int(c.green() * shade))),
-        max(0, min(255, int(c.blue() * shade))),
-        c.alpha(),
-    )
+def _draw_uv_triangle(painter: QPainter, pts, uvs, image: QImage) -> None:
+    """Map one OBJ UV triangle directly with an affine image transform.
 
-
-def _mix_point(a: QPointF, b: QPointF, c: QPointF, u: float, v: float) -> QPointF:
-    w = 1.0 - u - v
-    return QPointF(a.x()*w + b.x()*u + c.x()*v, a.y()*w + b.y()*u + c.y()*v)
-
-
-def _mix_uv(a, b, c, u: float, v: float) -> tuple[float, float]:
-    w = 1.0 - u - v
-    return (a[0]*w + b[0]*u + c[0]*v, a[1]*w + b[1]*u + c[1]*v)
-
-
-def _draw_uv_triangle(painter: QPainter, pts, uvs, image: QImage, subdivisions: int = 6) -> None:
-    """Approximate perspective texture mapping with a bounded UV micro-mesh."""
-    p0, p1, p2 = pts
-    t0, t1, t2 = uvs
-    n = max(2, min(10, subdivisions))
-    painter.setPen(Qt.NoPen)
-    for i in range(n):
-        for j in range(n - i):
-            u0, v0 = i/n, j/n
-            u1, v1 = (i+1)/n, j/n
-            u2, v2 = i/n, (j+1)/n
-            a = _mix_point(p0,p1,p2,u0,v0); b = _mix_point(p0,p1,p2,u1,v1); c = _mix_point(p0,p1,p2,u2,v2)
-            tuv = _mix_uv(t0,t1,t2,(u0+u1+u2)/3,(v0+v1+v2)/3)
-            painter.setBrush(_sample_texture(image, tuv, 0.94))
-            painter.drawPolygon(QPolygonF([a,b,c]))
-            if i + j + 1 < n:
-                u3, v3 = (i+1)/n, (j+1)/n
-                d = _mix_point(p0,p1,p2,u3,v3)
-                tuv2 = _mix_uv(t0,t1,t2,(u1+u2+u3)/3,(v1+v2+v3)/3)
-                painter.setBrush(_sample_texture(image, tuv2, 0.94))
-                painter.drawPolygon(QPolygonF([b,d,c]))
-
+    Orthographic/isometric projection keeps each planar triangle affine, so a
+    direct transform is both faster and much more faithful than sampling the
+    texture into dozens of flat-colour micro-triangles.
+    """
+    if image is None or image.isNull() or len(pts) != 3 or len(uvs) != 3:
+        _draw_textured_quad(painter,list(pts),image,shade=18)
+        return
+    w=max(1,image.width()); h=max(1,image.height())
+    src=[(max(0.0,min(1.0,float(u)))*w, (1.0-max(0.0,min(1.0,float(v))))*h) for u,v in uvs]
+    if not _draw_affine_image_triangle(painter,list(pts),src,image,1.0):
+        _draw_textured_quad(painter,list(pts),image,shade=18)
 
 def _preview_scene_vertices(kind: str, elements, obj_vertices) -> list[tuple[float,float,float]]:
     if kind == "obj" and obj_vertices:
@@ -277,9 +298,20 @@ def _render_static_preview(jar_path: str, candidate, size: int = 280) -> tuple[Q
     scene_vertices = _preview_scene_vertices(kind, elements, normalized_obj)
     transform = _fit_iso_projection(scene_vertices, size)
 
-    if kind == "asset" and not images and not spec.get("model_path"):
+    if kind in {"asset","runtime_unresolved"} and not images and not spec.get("model_path"):
         painter.setPen(QColor("#9aa8b7"))
-        painter.drawText(canvas.rect(), Qt.AlignCenter, "No packaged static model\nor texture linked")
+        message = "Runtime renderer\nnot statically reconstructable" if kind == "runtime_unresolved" else "No packaged static model\nor texture linked"
+        painter.drawText(canvas.rect(), Qt.AlignCenter, message)
+    elif kind == "texture_card":
+        path=roles.get("all") or (texture_paths[0] if texture_paths else "")
+        image=images.get(path)
+        if image is not None and not image.isNull():
+            target=QRectF(54,48,size-108,size-116)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+            painter.drawImage(target,image,QRectF(image.rect()))
+        else:
+            painter.setPen(QColor("#9aa8b7"))
+            painter.drawText(canvas.rect(),Qt.AlignCenter,"Runtime renderer\nstatic icon unavailable")
     elif kind == "obj" and normalized_obj and spec.get("faces"):
         faces = list(spec.get("faces") or [])
         texcoords = list(spec.get("texcoords") or [])
@@ -293,7 +325,7 @@ def _render_static_preview(jar_path: str, candidate, size: int = 280) -> tuple[Q
             pts3=[normalized_obj[i] for i in vis if isinstance(i,int) and 0 <= i < len(normalized_obj)]
             if len(pts3)<3:
                 continue
-            depth=sum(p[0]+p[2]-p[1]*0.15 for p in pts3)/len(pts3)
+            depth=sum(p[0]+p[2]+p[1]*0.96 for p in pts3)/len(pts3)
             draw_faces.append((depth,face,pts3))
         for _depth,face,pts3 in sorted(draw_faces,key=lambda x:x[0]):
             vis=face.get("vertices",[]); uis=face.get("uvs",[])
@@ -310,7 +342,7 @@ def _render_static_preview(jar_path: str, candidate, size: int = 280) -> tuple[Q
                         uv=texcoords[ui]
                         tri_uv.append((float(uv[0]),float(uv[1])))
                 if uv_ok:
-                    _draw_uv_triangle(painter,tri2,tri_uv,texture,6)
+                    _draw_uv_triangle(painter,tri2,tri_uv,texture)
                 else:
                     _draw_textured_quad(painter,tri2,texture,shade=18)
         painter.setPen(QPen(QColor(100,120,140,120),1))
@@ -954,13 +986,19 @@ class BackportTab(AsyncTab):
             entity_total = content.get("entities_total")
             entity_text = "entity audit unavailable" if entity_total is None else f"{int(entity_total):,} entities"
             warning = " • content-loss manifest" if be_count or (entity_total not in (None, 0)) or content.get("entity_scan_status") == "unavailable" else ""
-            provider_targets = int(profile.get("backport_provider_target_count", 0) or 0)
+            target_registry = rep.get("target_registry") or {}
+            provider_catalog_targets = int(target_registry.get("backport_provider_targets_catalog", profile.get("backport_provider_target_count", 0)) or 0)
+            provider_registered_targets = int(target_registry.get("backport_provider_targets_registered", 0) or 0)
+            provider_text = (
+                f"{provider_registered_targets:,}/{provider_catalog_targets:,} provider targets registered"
+                if provider_catalog_targets else "0 provider targets"
+            )
             impact = p.get("mapping_quality_percent") or {}
             exact_pct = float(impact.get("exact", 0.0) or 0.0) + float(impact.get("backport_exact", 0.0) or 0.0)
             self.preflight_status.setText(
                 f"READY • {rep.get('regions', 0):,} regions • {p.get('chunks', 0):,} chunks • "
                 f"{p.get('unique_palette_states', 0):,} unique in-range palette states • "
-                f"{exact_pct:.1f}% exact by placed blocks • {provider_targets:,} provider target(s) • "
+                f"{exact_pct:.1f}% exact by placed blocks • {provider_text} • "
                 f"{be_count:,} block entities • {entity_text} • "
                 f"{len(profile.get('enabled_catalogs') or []):,} enabled catalog(s){warning}"
             )
@@ -986,12 +1024,21 @@ class BackportTab(AsyncTab):
                     f"{be_count:,} block entity record(s) and {int(entity_total):,} entity record(s) were found. "
                     "The current backend reports them in the loss manifest but does not translate them yet."
                 )
+            unavailable = p.get("unavailable_backport_candidates") or []
+            if unavailable:
+                unavailable_line = (
+                    f" {len(unavailable):,} high-impact source block type(s) have catalog backport candidates that are not "
+                    "registered in the selected target/template world; the log identifies those provider/config gaps. "
+                )
+            else:
+                unavailable_line = ""
             QMessageBox.information(
                 self,
                 "Conversion preflight ready",
                 f"Validated {p.get('chunks', 0):,} source chunks against the target registry and active mapping profile. "
                 f"Mapping impact is {exact_pct:.2f}% exact/backport-exact across placed in-range non-air blocks; "
-                f"the log lists the highest-impact non-exact mappings. {content_line} "
+                f"{provider_registered_targets:,}/{provider_catalog_targets:,} catalog backport target(s) are actually registered in the selected template. "
+                f"The log lists the highest-impact non-exact mappings.{unavailable_line}{content_line} "
                 "Output chunks will request a target-side relight. No output world was created. Convert map is now enabled.",
             )
 

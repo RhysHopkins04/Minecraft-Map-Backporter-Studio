@@ -197,9 +197,15 @@ For the analyzer/provider work, verify all of the following before relying on a 
 - vertical animated block textures preview frame 0 rather than being compressed into one face;
 - OBJ previews use packaged UV coordinates when present instead of painting one texture indiscriminately across the whole mesh;
 - Campfire Backport-style code-rendered campfires are represented by a synthesized crossed-log/fire preview rather than a full cube when their packaged texture family is discoverable;
+- dedicated textures under legacy `textures/models/...` paths are preferred for linked OBJ/DAE model geometry instead of unrelated block icons;
+- projected texture faces use affine image mapping rather than bounding-box clipping, so doors/campfires do not show diagonal slices of an unwarped square texture;
+- runtime-only tile/block entity renderers with no packaged static geometry are never invented as cubes: show a linked 2D texture/icon when one exists, otherwise report that the runtime renderer cannot be reconstructed statically;
 - HBM remains an architectural fallback rather than receiving automatic exact-name mapping authority;
 - recognized backport-provider catalogs are carried separately in the active workspace snapshot;
 - an exact provider target is selected only when the target world registry actually contains it;
+- preflight reports provider namespace counts from the actual target/template registry and lists high-impact catalog candidates that are unavailable there;
+- legacy trapdoor facing metadata is north=0, south=1, west=2, east=3 with the open/top bits preserved;
+- legacy door lower-half facing and open metadata plus upper-half hinge/powered metadata remain regression-covered independently;
 - a provider never shadows a vanilla block already present in the target version;
 - changing an enabled provider/catalog invalidates the verified conversion preflight;
 - preflight reports placed, in-range, non-air block counts by mapping quality plus the highest-impact non-exact mappings;
