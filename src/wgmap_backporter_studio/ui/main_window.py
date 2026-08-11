@@ -7,8 +7,8 @@ import traceback
 import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot, QStandardPaths, QUrl
-from PySide6.QtGui import QDesktopServices, QFontMetrics, QPixmap
+from PySide6.QtCore import QObject, QPointF, QThread, Qt, Signal, Slot, QStandardPaths, QUrl
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFontMetrics, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, __version__
 from ..core.catalog import load_catalog
-from ..core.jar_analyzer import analyze_jar, read_texture_bytes
+from ..core.jar_analyzer import analyze_jar, build_preview_spec, read_asset_bytes
 from ..core.legacy1710_engine import run_conversion, run_conversion_preflight
 from ..core.modpack_analyzer import analyze_modpack
 from ..core.version_targets import TARGETS
@@ -57,6 +57,116 @@ def _application_storage_root() -> Path:
     documents = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
     base = Path(documents) if documents else (Path.home() / "Documents")
     return base / APP_NAME
+
+
+def _preview_texture(jar_path: str, paths: list[str]) -> QPixmap | None:
+    for path in paths:
+        try:
+            raw = read_asset_bytes(jar_path, path)
+            px = QPixmap()
+            if px.loadFromData(raw) and not px.isNull():
+                return px.scaled(96, 96, Qt.IgnoreAspectRatio, Qt.FastTransformation)
+        except Exception:
+            continue
+    return None
+
+
+def _project_iso(x: float, y: float, z: float, cx: float, cy: float, scale: float) -> QPointF:
+    return QPointF(cx + (x - z) * scale, cy + (x + z) * scale * 0.48 - y * scale)
+
+
+def _draw_iso_box(painter: QPainter, bounds, brush: QBrush, cx: float, cy: float, scale: float) -> None:
+    x0, y0, z0, x1, y1, z1 = [float(v) for v in bounds]
+    # Draw the two visible side faces before the top face. A real Minecraft
+    # renderer is unnecessary here: this static projection is intended to show
+    # block shape/model identity safely without executing mod code.
+    right = QPolygonF([
+        _project_iso(x1, y0, z0, cx, cy, scale), _project_iso(x1, y0, z1, cx, cy, scale),
+        _project_iso(x1, y1, z1, cx, cy, scale), _project_iso(x1, y1, z0, cx, cy, scale),
+    ])
+    left = QPolygonF([
+        _project_iso(x0, y0, z1, cx, cy, scale), _project_iso(x1, y0, z1, cx, cy, scale),
+        _project_iso(x1, y1, z1, cx, cy, scale), _project_iso(x0, y1, z1, cx, cy, scale),
+    ])
+    top = QPolygonF([
+        _project_iso(x0, y1, z0, cx, cy, scale), _project_iso(x1, y1, z0, cx, cy, scale),
+        _project_iso(x1, y1, z1, cx, cy, scale), _project_iso(x0, y1, z1, cx, cy, scale),
+    ])
+    painter.setBrush(brush); painter.setOpacity(0.72); painter.drawPolygon(left)
+    painter.setOpacity(0.88); painter.drawPolygon(right)
+    painter.setOpacity(1.0); painter.drawPolygon(top)
+
+
+def _render_static_preview(jar_path: str, candidate, size: int = 280) -> tuple[QPixmap, str]:
+    spec = build_preview_spec(jar_path, candidate)
+    canvas = QPixmap(size, size)
+    canvas.fill(QColor("#0b0f14"))
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setPen(QPen(QColor("#708090"), 1))
+    texture = _preview_texture(jar_path, list(spec.get("texture_paths") or []))
+    brush = QBrush(texture) if texture is not None else QBrush(QColor("#66788a"))
+    cx, cy, scale = size * 0.50, size * 0.68, size / 58.0
+
+    kind = str(spec.get("kind") or "asset")
+    if kind == "asset" and texture is None and not spec.get("model_path"):
+        painter.setPen(QColor("#9aa8b7"))
+        painter.drawText(canvas.rect(), Qt.AlignCenter, "No packaged static model\nor texture linked")
+    elif kind == "obj" and spec.get("vertices") and spec.get("faces"):
+        verts = [list(map(float, v[:3])) for v in spec["vertices"]]
+        xs=[v[0] for v in verts]; ys=[v[1] for v in verts]; zs=[v[2] for v in verts]
+        spans=[max(xs)-min(xs),max(ys)-min(ys),max(zs)-min(zs)]
+        span=max(max(spans),1e-6)
+        norm=[((v[0]-min(xs))/span*16,(v[1]-min(ys))/span*16,(v[2]-min(zs))/span*16) for v in verts]
+        polys=[]
+        for face in spec["faces"]:
+            pts=[_project_iso(*norm[i],cx,cy,scale) for i in face if 0 <= i < len(norm)]
+            if len(pts)>=3:
+                avg=sum(p.y() for p in pts)/len(pts)
+                polys.append((avg,QPolygonF(pts)))
+        for _avg,poly in sorted(polys,key=lambda x:x[0]):
+            painter.setBrush(brush); painter.setOpacity(0.86); painter.drawPolygon(poly)
+        painter.setOpacity(1.0)
+    elif kind == "cross":
+        planes=[[(0,0,0),(16,0,16),(16,16,16),(0,16,0)],[(16,0,0),(0,0,16),(0,16,16),(16,16,0)]]
+        for plane in planes:
+            painter.setBrush(brush); painter.setOpacity(0.92)
+            painter.drawPolygon(QPolygonF([_project_iso(*v,cx,cy,scale) for v in plane]))
+        painter.setOpacity(1.0)
+    else:
+        elements=[]
+        if kind == "elements":
+            for element in spec.get("elements") or []:
+                if not isinstance(element, dict):
+                    continue
+                lo=element.get("from"); hi=element.get("to")
+                if isinstance(lo,list) and isinstance(hi,list) and len(lo)>=3 and len(hi)>=3:
+                    elements.append((lo[0],lo[1],lo[2],hi[0],hi[1],hi[2]))
+        elif kind == "slab":
+            elements=[(0,0,0,16,8,16)]
+        elif kind == "stairs":
+            elements=[(0,0,0,16,8,16),(0,8,8,16,16,16)]
+        elif kind == "fence":
+            elements=[(6,0,6,10,16,10),(0,5,7,16,8,9),(0,11,7,16,14,9)]
+        elif kind == "pane" or kind == "thin":
+            elements=[(7,0,0,9,16,16)]
+        elif kind == "wall":
+            elements=[(5,0,5,11,16,11),(0,0,6,16,12,10)]
+        else:
+            elements=[(0,0,0,16,16,16)]
+        for bounds in sorted(elements,key=lambda b:b[1]):
+            _draw_iso_box(painter,bounds,brush,cx,cy,scale)
+
+    painter.setOpacity(1.0)
+    painter.setPen(QColor("#d8dee9"))
+    label = str(spec.get("registry") or "")
+    if label:
+        painter.drawText(10, size - 12, label[:48])
+    painter.end()
+    detail = str(spec.get("note") or "Static asset preview")
+    if spec.get("model_path"):
+        detail += f"\n{spec['model_path']}"
+    return canvas, detail
 
 
 
@@ -350,11 +460,11 @@ class BackportTab(AsyncTab):
         og.setHorizontalSpacing(12)
         og.setVerticalSpacing(8)
 
-        self.hbm = QCheckBox("Use safe mod architectural block replacements")
+        self.hbm = QCheckBox("Use enabled catalog/backport block replacements")
         self.hbm.setChecked(True)
         self.hbm.setToolTip(
-            "Use only reviewed architectural/decorative mapping rules from mod namespaces enabled in Catalog Workspace. "
-            "Catalogs enable eligible target mods; they do not invent unreviewed block-to-block mappings."
+            "Prefer exact registered blocks from enabled backport-provider catalogs, then use reviewed architectural/decorative rules "
+            "from enabled mod namespaces. The target world's actual registry remains authoritative."
         )
         self.catalog_status = _muted("")
         self.yoff = QSpinBox()
@@ -441,16 +551,21 @@ class BackportTab(AsyncTab):
                 "enabled_mod_ids": [],
                 "registry_hints": [],
                 "candidate_count": 0,
+                "block_entity_count": 0,
+                "backport_providers": [],
             }
         try:
             snapshot = self._catalog_provider() or {}
         except Exception:
             snapshot = {}
+        providers = [item for item in (snapshot.get("backport_providers") or []) if isinstance(item, dict)]
         return {
             "enabled_catalogs": list(snapshot.get("enabled_catalogs") or []),
             "enabled_mod_ids": sorted({str(x).lower() for x in (snapshot.get("enabled_mod_ids") or []) if str(x).strip()}),
             "registry_hints": sorted({str(x).lower() for x in (snapshot.get("registry_hints") or []) if str(x).strip()}),
             "candidate_count": int(snapshot.get("candidate_count") or 0),
+            "block_entity_count": int(snapshot.get("block_entity_count") or 0),
+            "backport_providers": providers,
         }
 
     def _current_input_token(self) -> str:
@@ -492,9 +607,11 @@ class BackportTab(AsyncTab):
         if not labels:
             text = "Catalog Workspace: 0 enabled catalogs • safe mod rules will fall back to vanilla targets."
         else:
+            provider_count = len(snapshot.get("backport_providers") or [])
             text = (
                 f"Catalog Workspace: {len(labels):,} enabled catalog(s) • "
-                f"{snapshot['candidate_count']:,} active candidates • namespaces: {', '.join(mods) or 'none'}"
+                f"{snapshot['candidate_count']:,} active blocks • {snapshot.get('block_entity_count', 0):,} block entities • "
+                f"{provider_count:,} backport provider(s) • namespaces: {', '.join(mods) or 'none'}"
             )
         if hasattr(self, "catalog_status"):
             self.catalog_status.setText(text)
@@ -605,9 +722,13 @@ class BackportTab(AsyncTab):
             entity_total = content.get("entities_total")
             entity_text = "entity audit unavailable" if entity_total is None else f"{int(entity_total):,} entities"
             warning = " • content-loss manifest" if be_count or (entity_total not in (None, 0)) or content.get("entity_scan_status") == "unavailable" else ""
+            provider_targets = int(profile.get("backport_provider_target_count", 0) or 0)
+            impact = p.get("mapping_quality_percent") or {}
+            exact_pct = float(impact.get("exact", 0.0) or 0.0) + float(impact.get("backport_exact", 0.0) or 0.0)
             self.preflight_status.setText(
                 f"READY • {rep.get('regions', 0):,} regions • {p.get('chunks', 0):,} chunks • "
                 f"{p.get('unique_palette_states', 0):,} unique in-range palette states • "
+                f"{exact_pct:.1f}% exact by placed blocks • {provider_targets:,} provider target(s) • "
                 f"{be_count:,} block entities • {entity_text} • "
                 f"{len(profile.get('enabled_catalogs') or []):,} enabled catalog(s){warning}"
             )
@@ -637,8 +758,9 @@ class BackportTab(AsyncTab):
                 self,
                 "Conversion preflight ready",
                 f"Validated {p.get('chunks', 0):,} source chunks against the target registry and active mapping profile. "
-                f"{content_line} Output chunks will request a target-side relight. "
-                "No output world was created. Convert map is now enabled.",
+                f"Mapping impact is {exact_pct:.2f}% exact/backport-exact across placed in-range non-air blocks; "
+                f"the log lists the highest-impact non-exact mappings. {content_line} "
+                "Output chunks will request a target-side relight. No output world was created. Convert map is now enabled.",
             )
 
         def err(tb):
@@ -765,101 +887,187 @@ class JarAnalyzerTab(AsyncTab):
     addCatalogRequested = Signal(object)
 
     def __init__(self, store: WorkspaceStore | None = None):
-        super().__init__(); self.catalog = None; self._store = store
-        root = QVBoxLayout(self); root.addLayout(_title(
+        super().__init__()
+        self.catalog = None
+        self._store = store
+        root = QVBoxLayout(self)
+        root.addLayout(_title(
             "Mod / JAR Analyzer",
-            "Build a visual block-asset catalog from a mod JAR. This is useful when deciding what an older modpack can substitute during a map backport."
+            "Statically discover blocks and block/tile entities across legacy and modern mod JAR layouts, then preview packaged geometry without executing the mod."
         ))
-        top = QHBoxLayout(); self.jar = QLineEdit(); self.jar.setPlaceholderText("Select a mod .jar")
-        top.addWidget(self.jar, 1); browse = QPushButton("Browse…"); analyze = QPushButton("Analyze JAR"); analyze.setObjectName("primary")
-        top.addWidget(browse); top.addWidget(analyze); root.addLayout(top)
-        self.summary = _muted("No JAR analyzed yet."); root.addWidget(self.summary)
+        top = QHBoxLayout()
+        self.jar = QLineEdit()
+        self.jar.setPlaceholderText("Select a mod .jar")
+        top.addWidget(self.jar, 1)
+        browse = QPushButton("Browse…")
+        analyze = QPushButton("Analyze JAR")
+        analyze.setObjectName("primary")
+        top.addWidget(browse)
+        top.addWidget(analyze)
+        root.addLayout(top)
+        self.summary = _muted("No JAR analyzed yet.")
+        root.addWidget(self.summary)
+
         splitter = QSplitter(Qt.Horizontal)
-        self.table = _AdaptiveHeaderTable(0, 6)
-        jar_labels = ("Registry hint", "Display name", "Confidence", "Evidence", "Textures", "Models")
+        self.table = _AdaptiveHeaderTable(0, 7)
+        jar_labels = ("Kind", "Registry / class", "Display name", "Confidence", "Evidence", "Textures", "Models")
         _configure_resizable_columns(self.table, jar_labels)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows); self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSortingEnabled(True)
         splitter.addWidget(self.table)
-        side = QWidget(); sl = QVBoxLayout(side); self.preview = QLabel("Select a block to preview its first packaged texture."); self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumSize(250, 250); self.preview.setWordWrap(True)
+
+        side = QWidget()
+        sl = QVBoxLayout(side)
+        self.preview = QLabel("Select a block or block entity to preview packaged static geometry.")
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setMinimumSize(250, 250)
+        self.preview.setWordWrap(True)
         self.preview.setStyleSheet("background:#0b0f14;border:1px solid #303b48;border-radius:8px;")
-        sl.addWidget(self.preview, 1); self.notes = QPlainTextEdit(); self.notes.setReadOnly(True); self.notes.setMaximumHeight(150); sl.addWidget(self.notes); splitter.addWidget(side); splitter.setChildrenCollapsible(False); splitter.setSizes([800, 320]); root.addWidget(splitter, 1)
+        sl.addWidget(self.preview, 1)
+        self.notes = QPlainTextEdit()
+        self.notes.setReadOnly(True)
+        self.notes.setMaximumHeight(170)
+        sl.addWidget(self.notes)
+        splitter.addWidget(side)
+        splitter.setChildrenCollapsible(False)
+        splitter.setSizes([820, 340])
+        root.addWidget(splitter, 1)
+
         bottom = QHBoxLayout()
         self.add_to_workspace = QPushButton("Add to Catalog Workspace")
         self.add_to_workspace.setEnabled(False)
         self.export = QPushButton("Export catalog JSON…")
         self.export.setEnabled(False)
-        bottom.addStretch(); bottom.addWidget(self.add_to_workspace); bottom.addWidget(self.export); root.addLayout(bottom)
-        browse.clicked.connect(self._browse); analyze.clicked.connect(self._analyze)
+        bottom.addStretch()
+        bottom.addWidget(self.add_to_workspace)
+        bottom.addWidget(self.export)
+        root.addLayout(bottom)
+
+        browse.clicked.connect(self._browse)
+        analyze.clicked.connect(self._analyze)
         self.add_to_workspace.clicked.connect(self._add_to_workspace)
-        self.export.clicked.connect(self._export); self.table.itemSelectionChanged.connect(self._preview_selected)
+        self.export.clicked.connect(self._export)
+        self.table.itemSelectionChanged.connect(self._preview_selected)
 
     def _browse(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Select mod JAR", self.jar.text() or str(Path.home()), "Java archives (*.jar);;All files (*)")
-        if p: self.jar.setText(p)
+        p, _ = QFileDialog.getOpenFileName(
+            self, "Select mod JAR", self.jar.text() or str(Path.home()), "Java archives (*.jar);;All files (*)"
+        )
+        if p:
+            self.jar.setText(p)
 
     def _analyze(self):
         p = self.jar.text().strip()
-        if not p: QMessageBox.warning(self, "Missing JAR", "Select a mod JAR first."); return
-        self.summary.setText("Analyzing…"); self.table.setRowCount(0); self.preview.setText("Analyzing…")
-        def work(log): return analyze_jar(p, log=log)
-        def done(cat): self.catalog = cat; self._show_catalog(cat)
-        def err(tb): self.summary.setText("Analysis failed."); QMessageBox.critical(self, "JAR analysis failed", tb)
+        if not p:
+            QMessageBox.warning(self, "Missing JAR", "Select a mod JAR first.")
+            return
+        self.summary.setText("Analyzing…")
+        self.table.setRowCount(0)
+        self.preview.setPixmap(QPixmap())
+        self.preview.setText("Analyzing…")
+
+        def work(log):
+            return analyze_jar(p, log=log)
+
+        def done(cat):
+            self.catalog = cat
+            self._show_catalog(cat)
+
+        def err(tb):
+            self.summary.setText("Analysis failed.")
+            QMessageBox.critical(self, "JAR analysis failed", tb)
+
         self.launch(work, done, err)
 
     def _show_catalog(self, cat):
         stats = cat.analysis_stats or {}
         model_count = int(stats.get("packaged_model_assets", 0) or 0)
-        tile_count = int(stats.get("legacy_tile_entity_subclasses", 0) or 0)
-        model_text = f" • {model_count:,} packaged models" if model_count else ""
-        tile_text = f" • {tile_count:,} TileEntity classes" if tile_count else ""
-        self.summary.setText(f"{cat.mod_name or Path(cat.source).name} • {cat.loader_hint} • {cat.mod_version or 'version unknown'} • {len(cat.blocks):,} block candidates{model_text}{tile_text}")
-        self.table.setSortingEnabled(False); self.table.setRowCount(len(cat.blocks))
-        for r, b in enumerate(cat.blocks):
-            vals = [b.registry_hint, b.display_name, b.confidence, b.evidence, str(len(b.texture_paths)), str(len(b.model_paths))]
-            for c, v in enumerate(vals):
-                item = QTableWidgetItem(v)
+        provider = str(cat.provider_role or "general").replace("_", " ").title()
+        self.summary.setText(
+            f"{cat.mod_name or Path(cat.source).name} • {cat.loader_hint} • {cat.mod_version or 'version unknown'} • "
+            f"{len(cat.blocks):,} blocks • {len(cat.block_entities):,} block entities • {model_count:,} packaged models • {provider}"
+        )
+
+        rows: list[tuple[str, int, object]] = []
+        rows.extend(("Block", i, value) for i, value in enumerate(cat.blocks))
+        rows.extend(("Block entity", i, value) for i, value in enumerate(cat.block_entities))
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(rows))
+        for r, (kind, source_index, asset) in enumerate(rows):
+            identity = asset.registry_hint or getattr(asset, "class_name", "")
+            values = [
+                kind,
+                identity,
+                asset.display_name,
+                asset.confidence,
+                asset.evidence,
+                str(len(asset.texture_paths)),
+                str(len(asset.model_paths)),
+            ]
+            for c, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
                 if c == 0:
-                    item.setData(Qt.UserRole, r)
+                    item.setData(Qt.UserRole, ("block" if kind == "Block" else "block_entity", source_index))
                 self.table.setItem(r, c, item)
         self.table.setSortingEnabled(True)
-        self.notes.setPlainText("\n".join(cat.notes))
+
+        notes = list(cat.notes)
+        notes.insert(0, f"Provider role: {provider}. {cat.provider_reason or 'No special mapping authority assigned.'}")
+        self.notes.setPlainText("\n".join(notes))
         self.add_to_workspace.setEnabled(True)
         self.export.setEnabled(True)
-        self.preview.setText("Select a block to preview its first packaged texture.")
+        self.preview.setPixmap(QPixmap())
+        self.preview.setText("Select a block or block entity to preview packaged static geometry.")
 
     def _preview_selected(self):
-        if not self.catalog: return
-        rows = self.table.selectionModel().selectedRows()
-        if not rows: return
-        table_row = rows[0].row()
-        anchor = self.table.item(table_row, 0)
-        source_index = anchor.data(Qt.UserRole) if anchor is not None else None
-        if not isinstance(source_index, int) or not (0 <= source_index < len(self.catalog.blocks)):
-            return
-        b = self.catalog.blocks[source_index]
-        if not b.texture_paths:
-            self.preview.setPixmap(QPixmap()); self.preview.setText("No direct PNG texture was linked to this candidate."); return
-        try:
-            raw = read_texture_bytes(self.jar.text().strip(), b.texture_paths[0])
-            px = QPixmap(); px.loadFromData(raw); px = px.scaled(240, 240, Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.preview.setText(""); self.preview.setPixmap(px); self.preview.setToolTip(b.texture_paths[0])
-        except Exception as e:
-            self.preview.setPixmap(QPixmap()); self.preview.setText(f"Preview failed:\n{e}")
-
-    def _add_to_workspace(self):
         if not self.catalog:
             return
-        self.addCatalogRequested.emit(self.catalog.to_dict())
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return
+        anchor = self.table.item(rows[0].row(), 0)
+        token = anchor.data(Qt.UserRole) if anchor is not None else None
+        if not isinstance(token, tuple) or len(token) != 2:
+            return
+        kind, source_index = token
+        if not isinstance(source_index, int):
+            return
+        if kind == "block":
+            if not (0 <= source_index < len(self.catalog.blocks)):
+                return
+            candidate = self.catalog.blocks[source_index]
+        elif kind == "block_entity":
+            if not (0 <= source_index < len(self.catalog.block_entities)):
+                return
+            candidate = self.catalog.block_entities[source_index]
+        else:
+            return
+
+        try:
+            pixmap, detail = _render_static_preview(self.jar.text().strip(), candidate)
+            self.preview.setText("")
+            self.preview.setPixmap(pixmap)
+            self.preview.setToolTip(detail)
+        except Exception as exc:
+            self.preview.setPixmap(QPixmap())
+            self.preview.setText(f"Static preview unavailable:\n{exc}")
+
+    def _add_to_workspace(self):
+        if self.catalog:
+            self.addCatalogRequested.emit(self.catalog.to_dict())
 
     def _export(self):
-        if not self.catalog: return
+        if not self.catalog:
+            return
         suggested = (self.catalog.mod_ids[0] if self.catalog.mod_ids else "mod") + "-block-catalog.json"
         start = Path(suggested)
         if self._store is not None:
             self._store.ensure_layout()
             start = self._store.catalogs_dir / suggested
         p, _ = QFileDialog.getSaveFileName(self, "Export block catalog", str(start), "JSON (*.json)")
-        if p: self.catalog.save(p)
+        if p:
+            self.catalog.save(p)
 
 
 class ModpackAnalyzerTab(AsyncTab):
@@ -875,8 +1083,8 @@ class ModpackAnalyzerTab(AsyncTab):
         top.addWidget(self.path, 1); browse_folder = QPushButton("Folder…"); browse_zip = QPushButton("ZIP…"); run = QPushButton("Analyze modpack"); run.setObjectName("primary")
         top.addWidget(browse_folder); top.addWidget(browse_zip); top.addWidget(run); root.addLayout(top)
         self.summary = _muted("No modpack analyzed yet."); root.addWidget(self.summary)
-        self.table = _AdaptiveHeaderTable(0, 6)
-        modpack_labels = ("Mod", "Mod IDs", "Version", "Loader", "Block candidates", "Source")
+        self.table = _AdaptiveHeaderTable(0, 8)
+        modpack_labels = ("Mod", "Mod IDs", "Version", "Loader", "Blocks", "Block entities", "Role", "Source")
         _configure_resizable_columns(self.table, modpack_labels)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True); root.addWidget(self.table, 1)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(170); root.addWidget(self.log)
@@ -905,7 +1113,7 @@ class ModpackAnalyzerTab(AsyncTab):
             self.analysis = rep; self.summary.setText(f"{rep.pack_name or Path(rep.source).name} • Minecraft {rep.minecraft_version or 'unknown'} • {rep.local_jars} local JARs • {rep.manifested_files} manifest entries")
             self.table.setSortingEnabled(False); self.table.setRowCount(len(rep.mods))
             for r, m in enumerate(rep.mods):
-                vals = [m.mod_name or Path(m.source).name, ", ".join(m.mod_ids), m.version, m.loader_hint, str(m.block_candidates), m.source]
+                vals = [m.mod_name or Path(m.source).name, ", ".join(m.mod_ids), m.version, m.loader_hint, str(m.block_candidates), str(m.block_entities), m.provider_role.replace("_", " "), m.source]
                 for c, v in enumerate(vals): self.table.setItem(r, c, QTableWidgetItem(v))
             self.table.setSortingEnabled(True)
             if rep.notes: self.log.appendPlainText("\n".join(rep.notes))
@@ -975,8 +1183,8 @@ class CatalogTab(QWidget):
         source_panel.setMinimumWidth(260)
         splitter.addWidget(source_panel)
 
-        self.table = _AdaptiveHeaderTable(0, 6)
-        catalog_labels = ("Registry", "Display", "Mod", "Confidence", "Evidence", "Texture assets")
+        self.table = _AdaptiveHeaderTable(0, 7)
+        catalog_labels = ("Kind", "Registry / class", "Display", "Mod", "Confidence", "Evidence", "Assets")
         _configure_resizable_columns(self.table, catalog_labels)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSortingEnabled(True)
@@ -1071,6 +1279,9 @@ class CatalogTab(QWidget):
         stats = catalog.get("analysis_stats") or {}
         details = [source_path] if source_path else []
         details.append(f"{len(catalog.get('blocks', []) or []):,} block candidates")
+        details.append(f"{len(catalog.get('block_entities', []) or []):,} block/tile entity candidates")
+        role = str(catalog.get("provider_role") or "general").replace("_", " ")
+        details.append(f"Role: {role}")
         if stats.get("packaged_model_assets"):
             details.append(f"{int(stats['packaged_model_assets']):,} packaged models")
         item.setToolTip("\n".join(details))
@@ -1214,20 +1425,37 @@ class CatalogTab(QWidget):
             )
 
     def _active_rows(self) -> list[dict]:
+        """Rows shown in the workspace inspector; mapping authority still uses blocks only."""
         rows: list[dict] = []
         for source in self.sources:
             if not source["enabled"]:
                 continue
-            blocks = source["catalog"].get("blocks", []) or []
-            rows.extend(block for block in blocks if isinstance(block, dict))
+            catalog = source["catalog"]
+            for block in catalog.get("blocks", []) or []:
+                if isinstance(block, dict):
+                    row = dict(block)
+                    row["_workspace_kind"] = "Block"
+                    rows.append(row)
+            for block_entity in catalog.get("block_entities", []) or []:
+                if isinstance(block_entity, dict):
+                    row = dict(block_entity)
+                    row["_workspace_kind"] = "Block entity"
+                    rows.append(row)
         return rows
 
     def active_catalog_snapshot(self) -> dict:
-        """Return a pure-data snapshot suitable for a conversion mapping profile."""
+        """Return a pure-data snapshot suitable for a conversion mapping profile.
+
+        Backport-provider catalogs are carried separately so exact modern vanilla
+        names can be preferred without granting automatic mapping authority to
+        ordinary content mods or HBM-style architectural fallback catalogs.
+        """
         labels: list[str] = []
         mod_ids: set[str] = set()
         registry_hints: set[str] = set()
         candidate_count = 0
+        block_entity_count = 0
+        backport_providers: list[dict] = []
         for source in self.sources:
             if not source["enabled"]:
                 continue
@@ -1237,16 +1465,26 @@ class CatalogTab(QWidget):
                 if str(mod_id).strip():
                     mod_ids.add(str(mod_id).strip().lower())
             blocks = [block for block in (catalog.get("blocks", []) or []) if isinstance(block, dict)]
+            block_entities = [row for row in (catalog.get("block_entities", []) or []) if isinstance(row, dict)]
             candidate_count += len(blocks)
+            block_entity_count += len(block_entities)
             for block in blocks:
                 hint = str(block.get("registry_hint") or "").strip().lower()
                 if hint:
                     registry_hints.add(hint)
+            if str(catalog.get("provider_role") or "").strip().lower() == "backport_provider":
+                backport_providers.append({
+                    "label": str(source["label"]),
+                    "mod_ids": [str(x).strip().lower() for x in (catalog.get("mod_ids") or []) if str(x).strip()],
+                    "blocks": blocks,
+                })
         return {
             "enabled_catalogs": labels,
             "enabled_mod_ids": sorted(mod_ids),
             "registry_hints": sorted(registry_hints),
             "candidate_count": candidate_count,
+            "block_entity_count": block_entity_count,
+            "backport_providers": backport_providers,
         }
 
     def _refresh(self):
@@ -1255,29 +1493,45 @@ class CatalogTab(QWidget):
         rows = []
         for block in active_rows:
             hay = " ".join(str(block.get(key, "")) for key in (
-                "registry_hint", "display_name", "source_mod", "confidence",
+                "_workspace_kind", "registry_hint", "class_name", "display_name", "source_mod", "confidence",
                 "evidence", "candidate_kind", "localization_locale"
             )).lower()
             if not q or q in hay:
                 rows.append(block)
 
         enabled = sum(1 for source in self.sources if source["enabled"])
+        provider_count = sum(
+            1 for source in self.sources
+            if source["enabled"] and str(source["catalog"].get("provider_role") or "").lower() == "backport_provider"
+        )
+        active_be_count = sum(
+            len(source["catalog"].get("block_entities", []) or [])
+            for source in self.sources if source["enabled"]
+        )
+        active_block_count = sum(
+            len(source["catalog"].get("blocks", []) or [])
+            for source in self.sources if source["enabled"]
+        )
         self.summary.setText(
             f"{len(self.sources):,} catalog source(s) loaded • {enabled:,} enabled • "
-            f"{len(active_rows):,} active block candidates • {len(rows):,} shown"
+            f"{provider_count:,} backport provider(s) • {active_block_count:,} active blocks • "
+            f"{active_be_count:,} block entities • {len(rows):,} asset row(s) shown"
             if self.sources else "No catalogs loaded yet."
         )
 
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         for row_index, block in enumerate(rows):
+            identity = block.get("registry_hint", "") or block.get("class_name", "")
+            asset_count = len(block.get("texture_paths", []) or []) + len(block.get("model_paths", []) or [])
             values = [
-                block.get("registry_hint", ""),
+                block.get("_workspace_kind", "Block"),
+                identity,
                 block.get("display_name", ""),
                 block.get("source_mod", ""),
                 block.get("confidence", ""),
                 block.get("evidence", ""),
-                str(len(block.get("texture_paths", []) or [])),
+                str(asset_count),
             ]
             for column, value in enumerate(values):
                 self.table.setItem(row_index, column, QTableWidgetItem(str(value)))

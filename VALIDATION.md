@@ -180,3 +180,23 @@ Before the next integrated map conversion test, verify the packaged application 
 - confirm **Export catalog JSON…** and **Export combined analysis…** default to the application `Catalogs` directory while remaining user-selectable;
 - confirm **Storage folder** opens the user-visible application storage root;
 - after restoring a workspace, run Map Backporter preflight and confirm the restored enabled catalogs participate in the active mapping profile exactly as they did before restart.
+
+
+## Cross-generation JAR analysis and backport-provider validation
+
+For the analyzer/provider work, verify all of the following before relying on a new catalog:
+
+- legacy Forge JARs without `mcmod.info` can still be identified from manifest/class evidence when possible;
+- enum-backed block registries are discovered instead of collapsing to texture-only candidates;
+- modern Forge/NeoForge/Fabric/Quilt blockstate/model layouts remain discoverable;
+- packaged legacy `TileEntity` and modern `BlockEntity` subclasses are listed separately from blocks;
+- the right-hand preview uses packaged static JSON/OBJ/texture information and never executes a mod's custom renderer;
+- HBM remains an architectural fallback rather than receiving automatic exact-name mapping authority;
+- recognized backport-provider catalogs are carried separately in the active workspace snapshot;
+- an exact provider target is selected only when the target world registry actually contains it;
+- a provider never shadows a vanilla block already present in the target version;
+- changing an enabled provider/catalog invalidates the verified conversion preflight;
+- preflight reports placed, in-range, non-air block counts by mapping quality plus the highest-impact non-exact mappings;
+- the text/JSON conversion reports preserve those mapping-impact diagnostics.
+
+Real-JAR regression targets used during development include Et Futurum Requiem, UpToDateMod, and HBM NTM. Exact candidate counts can change as those mods evolve, so validation should assert plausible non-trivial discovery rather than hard-coding upstream inventories into application behavior. Static discovery is intentionally best-effort for custom runtime-generated/obfuscated registrations.

@@ -39,19 +39,20 @@ The original large validation map used during development contains 34 populated 
 
 ### Mod / JAR Analyzer
 
-The application can inspect mod JARs for block-related information such as:
+The analyzer performs bounded static inspection without loading or executing the mod. It understands common legacy and modern metadata layouts (legacy Forge/FML, modern Forge/NeoForge, Fabric, Quilt, and LiteLoader) and also uses packaged bytecode/assets when formal metadata is absent. It can discover:
 
-- mod metadata,
-- asset namespaces,
-- blockstate/model JSON,
-- legacy model assets such as OBJ/DAE/HMF/TCN where packaged,
-- block textures,
-- English-first language/display-name hints,
-- class-file evidence for legacy static `Block` declarations,
+- legacy static `Block` holder fields and enum-backed registries such as Et Futurum Requiem's `ModBlocks`,
+- modern blockstate/model-driven block candidates,
+- packaged `TileEntity` / `BlockEntity` subclasses and block-entity type evidence,
+- JSON block models plus legacy OBJ/DAE/HMF/TCN assets where packaged,
+- block textures and English-first display/localization hints,
 - likely registry-name hints with confidence/evidence labels,
-- texture previews.
+- a safe static right-side model/shape preview built from packaged JSON/OBJ/texture assets,
+- a provider role that distinguishes ordinary catalogs, reviewed architectural fallbacks, and likely vanilla-content backport providers.
 
-For legacy Forge mods, class-file `Block` declarations are used as stronger evidence than blindly treating every file under `textures/blocks` as a registered block. Asset-derived registry names remain candidates rather than absolute proof, and custom registration/rendering can still require manual review.
+The goal is broad coverage from the 1.7.10 era through modern 1.21-era JAR layouts, not a claim that arbitrary runtime-generated registration can always be reconstructed statically. Published mods can use custom registries, obfuscated/intermediary names, runtime renderers, or generated assets that cannot be proven without actually loading that exact Minecraft/loader environment; those cases remain explicitly advisory rather than being invented.
+
+For legacy Forge mods, class/enum evidence is stronger than blindly treating every file under `textures/blocks` as registered. For modern mods, blockstates are strong asset evidence. Block/tile entities are shown separately and do not automatically become conversion mappings.
 
 ### Modpack Analyzer
 
@@ -73,7 +74,9 @@ WG Map Backporter Studio/
 
 Adding, removing, enabling, or disabling a catalog automatically updates `default-workspace.json`, and that workspace is restored on the next application launch. Catalog snapshots added to the workspace are also stored under `Catalogs/`. Manual **Save workspace copy…** and JSON export actions remain available for sharing or archival.
 
-The Map Backporter consumes the enabled catalog set as a live mapping profile: enabled mod IDs permit the converter's reviewed safe rules for those namespaces, while the target world's Forge registry remains authoritative for the actual block IDs. Catalogs do not automatically invent unreviewed source→target mappings.
+The Map Backporter consumes the enabled catalog set as a live mapping profile. Ordinary catalogs enable only reviewed rules for their namespaces. Catalogs classified as **backport providers** may additionally contribute conservative same-name modern-vanilla targets, but only when the actual target/template world's Forge registry confirms that exact provider block is registered. This lets an enabled Et Futurum/UpToDate/Campfire-style provider outrank a poor HBM/vanilla approximation without trusting an asset catalog as a numeric-ID authority.
+
+Preflight also counts actual in-range non-air block placements by mapping quality and reports the highest-impact non-exact mappings. This makes it possible to prioritize a bad replacement used tens of thousands of times instead of manually hunting through every unique palette state.
 
 ## Target versions
 

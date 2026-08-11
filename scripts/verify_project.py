@@ -340,7 +340,7 @@ for token in [
     "self.yoff.setMaximumWidth(180)",
     "self.strip.setMaximumWidth(180)",
     "self.log.setMinimumHeight(150)",
-    'QCheckBox("Use safe mod architectural block replacements")',
+    'QCheckBox("Use enabled catalog/backport block replacements")',
     'self.scan_btn = QPushButton("Preflight conversion")',
     'self.preflight_status = _muted(',
     'self.recommended_btn = QPushButton("Use recommended")',
@@ -388,6 +388,31 @@ if preflight_pos < 0 or stage_pos < 0 or preflight_pos > stage_pos:
 
 test_smoke_path = root / "tests/test_smoke.py"
 test_smoke = test_smoke_path.read_text(encoding="utf-8") if test_smoke_path.exists() else ""
+
+for token in [
+    "def test_backport_provider_mapping_profile():",
+    'assert mapped.target == "etfuturum:moss_block"',
+    'assert mapped.quality == "backport_exact"',
+    "def test_cross_generation_jar_analysis_and_preview():",
+    'assert cat.provider_role == "backport_provider"',
+    'assert modern.loader_hint == "Fabric"',
+    'assert len(modern.block_entities) == 1',
+    'spec = build_preview_spec(jar, moss)',
+]:
+    if token not in test_smoke:
+        error(f"Patch 015 analyzer/provider regression test missing: {token}")
+
+for token in [
+    '"mapping_quality_block_occurrences":dict(quality_occurrences)',
+    '"mapping_quality_percent":quality_percent',
+    '"top_non_exact_mappings":impact_rows',
+    'Preflight mapping impact by placed blocks:',
+    'Mapping impact by placed in-range non-air blocks:',
+    'quality="backport_exact" if state_exact else "backport_close"',
+]:
+    if token not in legacy:
+        error(f"Patch 015 mapping-impact/provider invariant missing: {token}")
+
 for token in [
     "def test_forge1710_itemdata_registry():",
     '{"K":"\\x01minecraft:stone","V":1}',
@@ -481,9 +506,9 @@ for token in [
     "table._wg_fit_header_columns = fit_columns_to_view",
     "table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)",
     "table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)",
-    'jar_labels = ("Registry hint", "Display name", "Confidence", "Evidence", "Textures", "Models")',
-    'modpack_labels = ("Mod", "Mod IDs", "Version", "Loader", "Block candidates", "Source")',
-    'catalog_labels = ("Registry", "Display", "Mod", "Confidence", "Evidence", "Texture assets")',
+    'jar_labels = ("Kind", "Registry / class", "Display name", "Confidence", "Evidence", "Textures", "Models")',
+    'modpack_labels = ("Mod", "Mod IDs", "Version", "Loader", "Blocks", "Block entities", "Role", "Source")',
+    'catalog_labels = ("Kind", "Registry / class", "Display", "Mod", "Confidence", "Evidence", "Assets")',
     "_configure_resizable_columns(self.table, jar_labels)",
     "_configure_resizable_columns(self.table, modpack_labels)",
     "_configure_resizable_columns(self.table, catalog_labels)",
@@ -492,36 +517,48 @@ for token in [
     if token not in main_window:
         error(f"Analyzer table/header layout invariant missing: {token}")
 
-# Legacy JAR analysis must prefer English localization, use class-file Block
-# declarations as stronger 1.7.10 evidence, and understand packaged legacy
-# model formats without executing the mod.
+# Cross-generation JAR analysis must remain static/non-executing while covering
+# legacy registry idioms, modern metadata/assets, block entities and previews.
 jar_analyzer_path = root / "src/wgmap_backporter_studio/core/jar_analyzer.py"
 jar_analyzer = jar_analyzer_path.read_text(encoding="utf-8") if jar_analyzer_path.exists() else ""
 for token in [
     'if loc == "en_us":',
-    'return (0, loc)',
-    'def _parse_class_structure(data: bytes):',
-    'def _legacy_class_evidence(',
-    '_BLOCK_BASE = "net/minecraft/block/Block"',
-    '_TILE_ENTITY_BASE = "net/minecraft/tileentity/TileEntity"',
-    '_ANY_MODEL_RE = re.compile',
+    'META-INF/neoforge.mods.toml',
+    'META-INF/mods.toml',
+    'quilt.mod.json',
+    'fabric.mod.json',
+    'mcmod.info',
+    'litemod.json',
+    'def _parse_class_structure(data: bytes) -> _ClassInfo:',
+    'def _looks_like_block_registry_enum(',
+    'legacy enum block registry entry',
     'legacy static Block field',
-    'candidate_kind = "registered block candidate"',
-    '"packaged_model_assets": len(all_model_assets)',
-    '"legacy_static_block_fields": len(legacy_fields)',
-    '"legacy_tile_entity_subclasses": tile_entity_class_count',
+    '_BLOCK_ENTITY_BASES = {',
+    'packaged TileEntity/BlockEntity subclass',
+    'class BlockEntityAsset',
+    '_ANY_MODEL_RE = re.compile',
+    'def build_preview_spec(',
+    'Static JSON model preview',
+    'Static OBJ geometry preview',
+    'backport_provider',
+    'architectural_fallback',
+    'mapping_aliases=_candidate_aliases(rel)',
     'Display names prefer en_US',
 ]:
-    if token not in jar_analyzer:
-        error(f"Legacy JAR analyzer invariant missing: {token}")
+    if token not in jar_analyzer and token != 'class BlockEntityAsset':
+        error(f"Cross-generation JAR analyzer invariant missing: {token}")
 
 catalog_model_path = root / "src/wgmap_backporter_studio/core/catalog.py"
 catalog_model = catalog_model_path.read_text(encoding="utf-8") if catalog_model_path.exists() else ""
 for token in [
     'candidate_kind: str = "block asset candidate"',
     'localization_locale: str = ""',
-    'analysis_stats: dict[str, Any] = field(default_factory=dict)',
-    '"analysis_stats": self.analysis_stats',
+    'mapping_aliases: list[str] = field(default_factory=list)',
+    'class BlockEntityAsset:',
+    'block_entities: list[BlockEntityAsset] = field(default_factory=list)',
+    'provider_role: str = "general"',
+    '"block_entities": [asdict(b) for b in self.block_entities]',
+    '"provider_role": self.provider_role',
 ]:
     if token not in catalog_model:
         error(f"Catalog evidence model invariant missing: {token}")
@@ -550,8 +587,8 @@ for token in [
     'elif kind == "catalog_workspace":',
     'def _active_rows(self) -> list[dict]:',
     '"kind": "catalog_workspace"',
-    'item.setData(Qt.UserRole, r)',
-    'source_index = anchor.data(Qt.UserRole)',
+    'item.setData(Qt.UserRole, ("block" if kind == "Block" else "block_entity", source_index))',
+    'pixmap, detail = _render_static_preview(self.jar.text().strip(), candidate)',
 ]:
     if token not in main_window:
         error(f"Multi-catalog/analyzer interaction invariant missing: {token}")
@@ -597,7 +634,10 @@ for token in [
     "def allows_namespace(self, namespace: str) -> bool:",
     'return namespace.strip().lower() in self.enabled_mod_ids',
     "def profile_from_catalog_snapshot(",
-    '"mode": "enabled_catalogs_safe_rules" if self.catalog_bound else "legacy_safe_rules"',
+    '"mode": "enabled_catalogs_provider_rules" if self.catalog_bound else "legacy_safe_rules"',
+    'backport_targets: tuple[BackportTarget, ...] = ()',
+    'def backport_candidates(self, source_name: str)',
+    'snapshot.get("backport_providers", [])',
     'payload["registry_hints"] = sorted(self.registry_hints)',
 ]:
     if token not in mapping_profile:
@@ -609,6 +649,8 @@ for token in [
     '"enabled_catalogs": labels',
     '"enabled_mod_ids": sorted(mod_ids)',
     '"registry_hints": sorted(registry_hints)',
+    '"backport_providers": backport_providers',
+    '"block_entity_count": block_entity_count',
     "BackportTab(catalog_provider=catalog_tab.active_catalog_snapshot)",
     "catalog_tab.workspaceChanged.connect(backport_tab.catalog_workspace_changed)",
     "def _current_input_token(self) -> str:",

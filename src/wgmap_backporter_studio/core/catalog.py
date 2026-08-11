@@ -1,10 +1,13 @@
 from __future__ import annotations
+
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+
 CATALOG_SCHEMA = 1
+
 
 @dataclass
 class BlockAsset:
@@ -20,6 +23,24 @@ class BlockAsset:
     source_file: str = ""
     candidate_kind: str = "block asset candidate"
     localization_locale: str = ""
+    mapping_aliases: list[str] = field(default_factory=list)
+    model_kind: str = ""
+
+
+@dataclass
+class BlockEntityAsset:
+    namespace: str
+    class_name: str
+    registry_hint: str = ""
+    display_name: str = ""
+    confidence: str = "medium"
+    evidence: str = "packaged BlockEntity/TileEntity subclass"
+    texture_paths: list[str] = field(default_factory=list)
+    model_paths: list[str] = field(default_factory=list)
+    source_mod: str = ""
+    source_file: str = ""
+    candidate_kind: str = "block entity class"
+
 
 @dataclass
 class ModCatalog:
@@ -30,9 +51,12 @@ class ModCatalog:
     mod_name: str = ""
     mod_version: str = ""
     blocks: list[BlockAsset] = field(default_factory=list)
+    block_entities: list[BlockEntityAsset] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     raw_metadata: dict[str, Any] = field(default_factory=dict)
     analysis_stats: dict[str, Any] = field(default_factory=dict)
+    provider_role: str = "general"
+    provider_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -44,10 +68,13 @@ class ModCatalog:
             "mod_ids": self.mod_ids,
             "mod_name": self.mod_name,
             "mod_version": self.mod_version,
+            "provider_role": self.provider_role,
+            "provider_reason": self.provider_reason,
             "notes": self.notes,
             "raw_metadata": self.raw_metadata,
             "analysis_stats": self.analysis_stats,
             "blocks": [asdict(b) for b in self.blocks],
+            "block_entities": [asdict(b) for b in self.block_entities],
         }
 
     def save(self, path: str | Path) -> None:

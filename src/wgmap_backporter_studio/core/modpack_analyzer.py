@@ -18,6 +18,8 @@ class PackModSummary:
     version: str
     loader_hint: str
     block_candidates: int
+    block_entities: int = 0
+    provider_role: str = "general"
     notes: list[str] = field(default_factory=list)
 
 @dataclass
@@ -63,6 +65,8 @@ def _summary(cat) -> PackModSummary:
         version=cat.mod_version,
         loader_hint=cat.loader_hint,
         block_candidates=len(cat.blocks),
+        block_entities=len(cat.block_entities),
+        provider_role=cat.provider_role,
         notes=cat.notes,
     )
 

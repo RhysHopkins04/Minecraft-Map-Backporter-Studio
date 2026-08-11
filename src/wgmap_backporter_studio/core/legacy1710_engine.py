@@ -509,6 +509,11 @@ def validate_target_registry(
             "Mapping profile: %d enabled catalog(s); eligible mod namespaces: %s"
             % (len(mapping_profile.enabled_catalogs), enabled)
         )
+        if mapping_profile.backport_targets:
+            log(
+                "Backport providers: %d exact-name target candidate(s) across %s"
+                % (len(mapping_profile.backport_targets), ", ".join(mapping_profile.to_dict().get("backport_provider_namespaces") or []) or "none")
+            )
         if mapping_profile.allow_safe_mod_replacements and not mapping_profile.enabled_mod_ids:
             log("NOTICE: safe mod replacements are enabled, but no Catalog Workspace sources are enabled; vanilla fallbacks will be used.")
         if mapping_profile.allows_namespace("hbm") and reg.hbm_count == 0:
@@ -566,12 +571,53 @@ def rail_meta(props, powered_kind=False):
             "south_east":6,"south_west":7,"north_west":8,"north_east":9}.get(shape,0)
 
 
+def _provider_state_meta(path, props):
+    """Best-effort legacy metadata for an exact-name backport-provider block.
+
+    Exact provider matching is intentionally conservative. Common vanilla shape
+    encodings are safe to derive from the modern state. Unknown stateful blocks
+    remain meta 0 and are labelled backport-close rather than pretending the
+    runtime state was translated perfectly.
+    """
+    p=path.lower()
+    if p.endswith("_stairs"):
+        return stair_meta(props), True
+    if p.endswith("_slab"):
+        return slab_meta(0,props), True
+    if p.endswith("_door"):
+        return door_meta(props), True
+    if p.endswith("_trapdoor"):
+        return trapdoor_meta(props), True
+    if p.endswith("_fence_gate"):
+        return gate_meta(props), True
+    if p.endswith("_button"):
+        return button_meta(props), True
+    if p.endswith("_wall_sign"):
+        return sign_wall_meta(props), True
+    if p.endswith("_sign") or p.endswith("_hanging_sign"):
+        try:
+            return int(props.get("rotation","0")) & 15, True
+        except Exception:
+            return 0, False
+    if p.endswith(("_log","_stem")):
+        return log_axis_bits(props), True
+    if p.endswith(("_wood","_hyphae")):
+        return log_axis_bits(props,True), True
+    if p.endswith("_leaves"):
+        # Imported build foliage should not decay immediately in 1.7.10.
+        return 4, True
+    if not props:
+        return 0, True
+    return 0, False
+
+
 def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: MappingProfile | None = None):
     """Return the closest legacy block mapping.
 
-    Reviewed mod-specific substitutions remain explicit rules. When a desktop
-    Catalog Workspace profile is supplied, a mod namespace must also be enabled
-    there before any of its safe substitutions can be used.
+    Exact registered blocks from enabled backport-provider catalogs are considered
+    before approximate architectural fallbacks, but only when the target world's
+    Forge registry confirms the provider block actually exists. Vanilla blocks
+    that already exist in 1.7.10 keep the explicit legacy metadata rules below.
     """
     p=name.split(":",1)[-1]
 
@@ -592,6 +638,25 @@ def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: 
     if name in AIR_NAMES: return V("minecraft:air")
     # Invisible/editor-only modern blocks are safer omitted than turned into visible cubes.
     if p in {"barrier","structure_block","jigsaw","light","end_gateway"}: return V("minecraft:air",0,"omitted","Modern editor/invisible block omitted")
+
+    # A backport provider may expose the same modern vanilla registry path in a
+    # 1.7.10 namespace. Do not let that shadow a real 1.7.10 vanilla block of the
+    # same name, and never trust a catalog target that is absent from the actual
+    # template-world registry.
+    if mapping_profile is not None and mapping_profile.allow_safe_mod_replacements and reg.resolve("minecraft:"+p) is None:
+        for candidate in mapping_profile.backport_candidates(name):
+            target=candidate.target_name
+            namespace=target.split(":",1)[0] if ":" in target else ""
+            if not mapping_profile.allows_namespace(namespace):
+                continue
+            if reg.resolve(target) is None:
+                continue
+            meta,state_exact=_provider_state_meta(p,props or {})
+            quality="backport_exact" if state_exact else "backport_close"
+            note="Exact-name block supplied by backport provider %s" % (candidate.provider or namespace)
+            if not state_exact:
+                note += "; block identity is exact but this state has no generic legacy metadata translator"
+            return V(target,meta,quality,note)
 
     # Colour families.
     for color,cmeta in COLOR_META.items():
@@ -995,6 +1060,8 @@ def preflight_source_mappings(
     source_ymin=999; source_ymax=-999; inrange_ymin=999; inrange_ymax=-999
     unresolved={}; parse_failures=[]; mapped_targets=collections.Counter()
     mapping_quality=collections.defaultdict(set); mod_targets=collections.Counter()
+    mapping_cache={}; mapping_impact=collections.Counter(); quality_occurrences=collections.Counter()
+    source_occurrences=collections.Counter(); block_occurrences_total=0
     crop_high_chunks=0; crop_low_chunks=0
     block_entity_types=collections.Counter()
     property_states=0; property_keys=collections.Counter()
@@ -1027,26 +1094,38 @@ def preflight_source_mappings(
                             continue
 
                         inrange_ymin=min(inrange_ymin,sy); inrange_ymax=max(inrange_ymax,sy)
-                        for name,props in palette:
+                        inds=unpack_palette_indices(section.get("data"),len(palette),4096,4)
+                        occurrence_counts=np.bincount(inds,minlength=len(palette)) if len(palette) else np.zeros(0,dtype=np.int64)
+                        for palette_index,(name,props) in enumerate(palette):
                             sig=_palette_signature(name,props)
-                            if sig in unique: continue
-                            unique.add(sig)
-                            if props:
-                                property_states+=1
-                                for prop_key in props:
-                                    property_keys[str(prop_key)]+=1
-                            try:
-                                mapping=map_modern(name,props,reg,use_hbm,mapping_profile)
-                                _,_,resolved=resolve_mapping(mapping,reg)
-                                mapped_targets[resolved]+=1
-                                mapping_quality[mapping.quality].add(str(name))
-                                if ":" in resolved and not resolved.lower().startswith("minecraft:"):
-                                    mod_targets[resolved]+=1
-                            except Exception as exc:
-                                unresolved.setdefault(str(exc),[]).append({
-                                    "source":str(name), "properties":dict(props or {}),
-                                    "region":rp.name, "chunk_index":idx,
-                                })
+                            if sig not in unique:
+                                unique.add(sig)
+                                if props:
+                                    property_states+=1
+                                    for prop_key in props:
+                                        property_keys[str(prop_key)]+=1
+                                try:
+                                    mapping=map_modern(name,props,reg,use_hbm,mapping_profile)
+                                    _,_,resolved=resolve_mapping(mapping,reg)
+                                    mapping_cache[sig]=(mapping,resolved)
+                                    mapped_targets[resolved]+=1
+                                    mapping_quality[mapping.quality].add(str(name))
+                                    if ":" in resolved and not resolved.lower().startswith("minecraft:"):
+                                        mod_targets[resolved]+=1
+                                except Exception as exc:
+                                    unresolved.setdefault(str(exc),[]).append({
+                                        "source":str(name), "properties":dict(props or {}),
+                                        "region":rp.name, "chunk_index":idx,
+                                    })
+                            cached=mapping_cache.get(sig)
+                            if cached is not None:
+                                mapping,resolved=cached
+                                count=int(occurrence_counts[palette_index]) if palette_index < len(occurrence_counts) else 0
+                                if count and str(name) not in AIR_NAMES:
+                                    block_occurrences_total+=count
+                                    source_occurrences[str(name)]+=count
+                                    quality_occurrences[mapping.quality]+=count
+                                    mapping_impact[(str(name),str(resolved),str(mapping.quality),str(mapping.note or ""))]+=count
                     if chunk_high: crop_high_chunks+=1
                     if chunk_low: crop_low_chunks+=1
                 except Exception as exc:
@@ -1074,6 +1153,21 @@ def preflight_source_mappings(
             "No output world was created. %s" % (len(unresolved),"; ".join(details))
         )
 
+    impact_rows=[]
+    for (source_name,target_name,quality,note),count in mapping_impact.most_common():
+        if quality in {"exact","backport_exact"}:
+            continue
+        impact_rows.append({
+            "source":source_name, "target":target_name, "quality":quality,
+            "count":int(count), "note":note,
+        })
+        if len(impact_rows)>=40:
+            break
+    quality_percent={
+        quality:(100.0*int(count)/block_occurrences_total if block_occurrences_total else 0.0)
+        for quality,count in quality_occurrences.items()
+    }
+
     info={
         "chunks":chunks,
         "unique_palette_states":len(unique),
@@ -1100,6 +1194,13 @@ def preflight_source_mappings(
         "target_relight_required":True,
         "unique_palette_states_with_properties":property_states,
         "property_keys_seen":dict(property_keys),
+        "block_occurrences_total":int(block_occurrences_total),
+        "mapping_quality_block_occurrences":dict(quality_occurrences),
+        "mapping_quality_percent":quality_percent,
+        "top_non_exact_mappings":impact_rows,
+        "top_source_block_occurrences":[
+            {"source":name,"count":int(count)} for name,count in source_occurrences.most_common(40)
+        ],
     }
     log(
         "Preflight passed: %d chunks; %d unique in-range palette states; DataVersion(s): %s"
@@ -1115,6 +1216,17 @@ def preflight_source_mappings(
             "Preflight safe-mod usage: %d configured target block name(s) from enabled catalog namespaces."
             % len(mod_targets)
         )
+    if block_occurrences_total:
+        ordered=("backport_exact","exact","backport_close","close","approximate","omitted")
+        parts=[]
+        for quality in ordered:
+            if quality_occurrences.get(quality):
+                parts.append("%s %.2f%%"%(quality,quality_percent.get(quality,0.0)))
+        if parts:
+            log("Preflight mapping impact by placed blocks: "+"; ".join(parts))
+        if impact_rows:
+            sample=", ".join("%s -> %s (%s, %d)"%(row["source"],row["target"],row["quality"],row["count"]) for row in impact_rows[:8])
+            log("Highest-impact non-exact mappings: "+sample)
     return info
 
 # ---------- Legacy NBT writer ----------
@@ -1769,8 +1881,27 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             "Failed chunks: %d"%serial.get("chunks_failed",0),
             "Chunks with source blocks cropped above Y=255: %d"%serial.get("chunks_cropped_above_255",0),
             "Chunks with source blocks cropped below Y=0: %d"%serial.get("chunks_cropped_below_0",0), "",
-            "Approximate/omitted modern blocks:",
         ]
+        preflight=serial.get("preflight") or {}
+        occurrence_total=int(preflight.get("block_occurrences_total",0) or 0)
+        quality_occurrences=preflight.get("mapping_quality_block_occurrences") or {}
+        quality_percent=preflight.get("mapping_quality_percent") or {}
+        if occurrence_total:
+            lines += ["Mapping impact by placed in-range non-air blocks:"]
+            for quality in ("backport_exact","exact","backport_close","close","approximate","omitted"):
+                count=int(quality_occurrences.get(quality,0) or 0)
+                if count:
+                    lines.append("- %s: %d (%.3f%%)"%(quality,count,float(quality_percent.get(quality,0.0) or 0.0)))
+            impact=preflight.get("top_non_exact_mappings") or []
+            if impact:
+                lines += ["", "Highest-impact non-exact mappings:"]
+                for row in impact[:25]:
+                    lines.append("- %d × %s -> %s [%s]%s"%(
+                        int(row.get("count",0) or 0), row.get("source","?"), row.get("target","?"),
+                        row.get("quality","?"), (" — "+str(row.get("note"))) if row.get("note") else ""
+                    ))
+            lines += [""]
+        lines += ["Approximate/omitted modern blocks:"]
         for name in sorted(report["mapping_notes"]):
             e=report["mapping_notes"][name]
             lines.append("- %s -> %s:%d [%s]%s"%(

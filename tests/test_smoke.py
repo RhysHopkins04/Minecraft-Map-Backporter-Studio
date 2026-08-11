@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from wgmap_backporter_studio.core.jar_analyzer import analyze_jar
+from wgmap_backporter_studio.core.jar_analyzer import analyze_jar, build_preview_spec
 from wgmap_backporter_studio.core.modpack_analyzer import analyze_modpack
 from wgmap_backporter_studio.core.version_targets import TARGET_BY_VERSION
 from wgmap_backporter_studio.core.mapping_profiles import profile_from_catalog_snapshot
@@ -50,6 +50,135 @@ def _minimal_block_holder_class() -> bytes:
     out += struct.pack(">H", 0)  # class attributes
     return bytes(out)
 
+
+
+
+def _minimal_enum_block_registry_class() -> bytes:
+    """Tiny ModBlocks-style enum with two enum constants and registration evidence."""
+    cp = []
+
+    def utf8(value: str):
+        raw = value.encode("utf-8")
+        cp.append(b"\x01" + struct.pack(">H", len(raw)) + raw)
+        return len(cp)
+
+    def class_ref(name_index: int):
+        cp.append(b"\x07" + struct.pack(">H", name_index))
+        return len(cp)
+
+    this_name = utf8("future/ModBlocks")
+    this_class = class_ref(this_name)
+    super_name = utf8("java/lang/Enum")
+    super_class = class_ref(super_name)
+    moss_name = utf8("MOSS_BLOCK")
+    roots_name = utf8("HANGING_ROOTS")
+    own_desc = utf8("Lfuture/ModBlocks;")
+    utf8("GameRegistry")
+    utf8("registerBlock")
+    utf8("net/minecraft/block/Block")
+    utf8("cpw/mods/fml/common/Mod")
+
+    out = bytearray()
+    out += struct.pack(">IHHH", 0xCAFEBABE, 0, 52, len(cp) + 1)
+    for entry in cp:
+        out += entry
+    out += struct.pack(">HHH", 0x4021, this_class, super_class)
+    out += struct.pack(">H", 0)
+    out += struct.pack(">H", 2)
+    out += struct.pack(">HHHH", 0x4019, moss_name, own_desc, 0)
+    out += struct.pack(">HHHH", 0x4019, roots_name, own_desc, 0)
+    out += struct.pack(">H", 0)
+    out += struct.pack(">H", 0)
+    return bytes(out)
+
+
+def _minimal_tile_entity_class() -> bytes:
+    cp = []
+
+    def utf8(value: str):
+        raw = value.encode("utf-8")
+        cp.append(b"\x01" + struct.pack(">H", len(raw)) + raw)
+        return len(cp)
+
+    def class_ref(name_index: int):
+        cp.append(b"\x07" + struct.pack(">H", name_index))
+        return len(cp)
+
+    this_name = utf8("future/TileEntityFancySign")
+    this_class = class_ref(this_name)
+    super_name = utf8("net/minecraft/tileentity/TileEntity")
+    super_class = class_ref(super_name)
+    out = bytearray()
+    out += struct.pack(">IHHH", 0xCAFEBABE, 0, 52, len(cp) + 1)
+    for entry in cp:
+        out += entry
+    out += struct.pack(">HHH", 0x0021, this_class, super_class)
+    out += struct.pack(">H", 0)
+    out += struct.pack(">H", 0)
+    out += struct.pack(">H", 0)
+    out += struct.pack(">H", 0)
+    return bytes(out)
+
+
+def _minimal_modern_block_entity_class() -> bytes:
+    cp = []
+
+    def utf8(value: str):
+        raw = value.encode("utf-8")
+        cp.append(b"\x01" + struct.pack(">H", len(raw)) + raw)
+        return len(cp)
+
+    def class_ref(name_index: int):
+        cp.append(b"\x07" + struct.pack(">H", name_index))
+        return len(cp)
+
+    this_name = utf8("modern/DisplayBlockEntity")
+    this_class = class_ref(this_name)
+    super_name = utf8("net/minecraft/world/level/block/entity/BlockEntity")
+    super_class = class_ref(super_name)
+    out = bytearray()
+    out += struct.pack(">IHHH", 0xCAFEBABE, 0, 65, len(cp) + 1)
+    for entry in cp:
+        out += entry
+    out += struct.pack(">HHH", 0x0021, this_class, super_class)
+    out += struct.pack(">H", 0) + struct.pack(">H", 0) + struct.pack(">H", 0) + struct.pack(">H", 0)
+    return bytes(out)
+
+
+def make_modern_fabric_jar(path: Path):
+    png = bytes.fromhex("89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000000D49444154789C63606060F80F0001040100F805FF640000000049454E44AE426082")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("fabric.mod.json", json.dumps({
+            "schemaVersion": 1, "id": "modern", "name": "Modern Decor",
+            "version": "1.0", "depends": {"minecraft": ">=1.20 <=1.21.1"},
+        }))
+        z.writestr("assets/modern/blockstates/display_block.json", json.dumps({
+            "variants": {"": {"model": "modern:block/display_block"}}
+        }))
+        z.writestr("assets/modern/models/block/display_block.json", json.dumps({
+            "parent": "minecraft:block/cube_all",
+            "textures": {"all": "modern:block/display_block"},
+        }))
+        z.writestr("assets/modern/textures/block/display_block.png", png)
+        z.writestr("modern/DisplayBlockEntity.class", _minimal_modern_block_entity_class())
+
+
+def make_enum_backport_jar(path: Path):
+    png = bytes.fromhex("89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000000D49444154789C63606060F80F0001040100F805FF640000000049454E44AE426082")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        # Deliberately no mcmod.info: loader/mod-id inference must still work.
+        z.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\nFMLCorePluginContainsFMLMod: true\n")
+        z.writestr("assets/etfuturum/textures/blocks/moss_block.png", png)
+        z.writestr("assets/etfuturum/textures/blocks/hanging_roots.png", png)
+        z.writestr("assets/etfuturum/models/block/moss_block.json", json.dumps({
+            "parent": "block/cube_all",
+            "textures": {"all": "etfuturum:blocks/moss_block"},
+        }))
+        z.writestr("assets/etfuturum/blockstates/moss_block.json", json.dumps({
+            "variants": {"normal": {"model": "etfuturum:block/moss_block"}}
+        }))
+        z.writestr("future/ModBlocks.class", _minimal_enum_block_registry_class())
+        z.writestr("future/TileEntityFancySign.class", _minimal_tile_entity_class())
 
 def make_fake_jar(path: Path):
     mcmod = [{"modid":"demo","name":"Demo Blocks","version":"1.0","mcversion":"1.7.10"}]
@@ -144,6 +273,57 @@ def test_catalog_bound_mapping_profile():
 
 
 
+def test_backport_provider_mapping_profile():
+    reg = legacy1710_engine.TargetRegistry({
+        "minecraft:air": 0, "minecraft:stone": 1, "minecraft:grass": 2,
+        "minecraft:dirt": 3, "minecraft:cobblestone": 4, "minecraft:planks": 5,
+        "minecraft:bedrock": 7, "minecraft:water": 9,
+        "etfuturum:moss_block": 700,
+    })
+    snapshot = {
+        "enabled_catalogs": ["Et Futurum Requiem"],
+        "enabled_mod_ids": ["etfuturum"],
+        "registry_hints": ["etfuturum:moss_block"],
+        "candidate_count": 1,
+        "backport_providers": [{
+            "label": "Et Futurum Requiem",
+            "blocks": [{
+                "registry_hint": "etfuturum:moss_block",
+                "confidence": "high",
+                "candidate_kind": "registered block candidate",
+                "mapping_aliases": ["moss_block"],
+            }],
+        }],
+    }
+    profile = profile_from_catalog_snapshot(snapshot, True)
+    mapped = legacy1710_engine.map_modern("minecraft:moss_block", {}, reg, True, profile)
+    assert mapped.target == "etfuturum:moss_block"
+    assert mapped.quality == "backport_exact"
+
+    # A provider catalog is advisory until the actual target-world registry confirms it.
+    missing_reg = legacy1710_engine.TargetRegistry({
+        "minecraft:air": 0, "minecraft:stone": 1, "minecraft:grass": 2,
+        "minecraft:dirt": 3, "minecraft:cobblestone": 4, "minecraft:planks": 5,
+        "minecraft:bedrock": 7, "minecraft:water": 9,
+    })
+    fallback = legacy1710_engine.map_modern("minecraft:moss_block", {}, missing_reg, True, profile)
+    assert fallback.target == "minecraft:grass"
+    assert fallback.quality == "approximate"
+
+    # A provider must never hijack a vanilla 1.7.10 block that already exists.
+    stone_snapshot = dict(snapshot)
+    stone_snapshot["backport_providers"] = [{
+        "label": "Provider",
+        "blocks": [{
+            "registry_hint": "etfuturum:stone", "confidence": "high",
+            "candidate_kind": "registered block candidate", "mapping_aliases": ["stone"],
+        }],
+    }]
+    stone_profile = profile_from_catalog_snapshot(stone_snapshot, True)
+    stone = legacy1710_engine.map_modern("minecraft:stone", {}, reg, True, stone_profile)
+    assert stone.target == "minecraft:stone"
+
+
 def _nbt_string_payload(value: str) -> bytes:
     return legacy1710_engine.nbt_name(value)
 
@@ -192,6 +372,38 @@ def test_content_audit_and_legacy_roundtrip():
         assert audit["entity_types"]["minecraft:cow"] == 1
 
 
+
+
+def test_cross_generation_jar_analysis_and_preview():
+    with tempfile.TemporaryDirectory() as td:
+        jar = Path(td) / "future-backport.jar"
+        make_enum_backport_jar(jar)
+        cat = analyze_jar(jar)
+        assert cat.loader_hint == "Forge/FML (legacy, inferred)"
+        assert "etfuturum" in cat.mod_ids
+        assert cat.provider_role == "backport_provider"
+        hints = {block.registry_hint for block in cat.blocks}
+        assert "etfuturum:moss_block" in hints
+        assert "etfuturum:hanging_roots" in hints
+        assert len(cat.block_entities) == 1
+        assert "TileEntityFancySign" in cat.block_entities[0].class_name
+        moss = next(block for block in cat.blocks if block.registry_hint == "etfuturum:moss_block")
+        spec = build_preview_spec(jar, moss)
+        assert spec["kind"] in {"cube", "elements"}
+        assert spec["model_path"].endswith("moss_block.json")
+        assert any(path.endswith("moss_block.png") for path in spec["texture_paths"])
+
+        modern_jar = Path(td) / "modern-fabric.jar"
+        make_modern_fabric_jar(modern_jar)
+        modern = analyze_jar(modern_jar)
+        assert modern.loader_hint == "Fabric"
+        assert modern.minecraft_hint == ">=1.20 <=1.21.1"
+        assert {b.registry_hint for b in modern.blocks} == {"modern:display_block"}
+        assert len(modern.block_entities) == 1
+        assert "DisplayBlockEntity" in modern.block_entities[0].class_name
+        modern_spec = build_preview_spec(modern_jar, modern.blocks[0])
+        assert modern_spec["model_path"].endswith("display_block.json")
+        assert any(path.endswith("display_block.png") for path in modern_spec["texture_paths"])
 
 
 def test_workspace_store_persistence():
@@ -253,7 +465,9 @@ def main():
     assert hasattr(legacy1710_engine, "run_conversion_preflight")
     test_forge1710_itemdata_registry()
     test_catalog_bound_mapping_profile()
+    test_backport_provider_mapping_profile()
     test_content_audit_and_legacy_roundtrip()
+    test_cross_generation_jar_analysis_and_preview()
     test_staged_output_promotion()
     test_workspace_store_persistence()
     assert packaged_self_test() == 0
@@ -274,6 +488,8 @@ def main():
         pack = td / "pack"; (pack / "mods").mkdir(parents=True); (pack / "mods" / "demo.jar").write_bytes(jar.read_bytes())
         rep = analyze_modpack(pack)
         assert rep.local_jars == 1 and rep.mods[0].block_candidates >= 1
+        assert rep.mods[0].block_entities >= 0
+        assert rep.mods[0].provider_role == "general"
     print("core smoke tests passed")
 
 if __name__ == "__main__": main()

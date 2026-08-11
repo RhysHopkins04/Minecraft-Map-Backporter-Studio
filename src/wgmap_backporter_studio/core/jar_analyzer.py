@@ -7,20 +7,50 @@ import struct
 import tomllib
 import zipfile
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Any, Iterable
 
-from .catalog import BlockAsset, ModCatalog
+from .catalog import BlockAsset, BlockEntityAsset, ModCatalog
+
 
 _TEXTURE_RE = re.compile(r"^assets/([^/]+)/textures/(?:block|blocks)/(.+)\.png$", re.I)
-_MODEL_RE = re.compile(r"^assets/([^/]+)/models/block/(.+)\.json$", re.I)
+_MODEL_RE = re.compile(r"^assets/([^/]+)/models/(?:block|blocks)/(.+)\.json$", re.I)
 _ANY_MODEL_RE = re.compile(r"^assets/([^/]+)/models/(.+)\.(json|obj|dae|hmf|tcn)$", re.I)
 _BLOCKSTATE_RE = re.compile(r"^assets/([^/]+)/blockstates/(.+)\.json$", re.I)
 _LANG_RE = re.compile(r"^assets/([^/]+)/lang/([^/]+)\.(?:lang|json)$", re.I)
-_BLOCK_DESCRIPTOR = "Lnet/minecraft/block/Block;"
-_BLOCK_BASE = "net/minecraft/block/Block"
-_TILE_ENTITY_BASE = "net/minecraft/tileentity/TileEntity"
+
+_BLOCK_BASES = {
+    "net/minecraft/block/Block",  # MCP / legacy Forge / older Fabric mappings
+    "net/minecraft/world/level/block/Block",  # Mojmap 1.17+
+}
+_BLOCK_ENTITY_BASES = {
+    "net/minecraft/tileentity/TileEntity",  # MCP through 1.16.x
+    "net/minecraft/world/level/block/entity/BlockEntity",  # Mojmap 1.17+
+    "net/minecraft/block/entity/BlockEntity",  # Yarn named mappings
+}
+_BLOCK_ENTITY_TYPE_DESCRIPTORS = {
+    "Lnet/minecraft/tileentity/TileEntityType;",
+    "Lnet/minecraft/world/level/block/entity/BlockEntityType;",
+    "Lnet/minecraft/block/entity/BlockEntityType;",
+}
 _ACC_STATIC = 0x0008
+_ACC_ENUM = 0x4000
+
+_KNOWN_BACKPORT_IDS = {
+    "etfuturum", "et_futurum", "uptodate", "uptodatemod", "campfirebackport",
+    "futuremc", "futureminecraft", "futureversions",
+}
+_KNOWN_ARCHITECTURAL_IDS = {"hbm"}
+
+
+@dataclass
+class _ClassInfo:
+    name: str
+    super_name: str
+    access_flags: int
+    fields: list[tuple[int, str, str]]
+    utf8: tuple[str, ...]
 
 
 def _safe_json(data: bytes):
@@ -51,6 +81,21 @@ def _parse_mods_toml(data: bytes) -> dict:
     return {"mods_toml": obj, "first_mod": first}
 
 
+def _manifest_values(data: bytes) -> dict[str, str]:
+    out: dict[str, str] = {}
+    current = ""
+    for line in data.decode("utf-8", "replace").splitlines():
+        if line.startswith(" ") and current:
+            out[current] = out.get(current, "") + line[1:]
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        current = key.strip()
+        out[current] = value.strip()
+    return out
+
+
 def _locale_rank(locale: str) -> tuple[int, str]:
     loc = locale.lower().replace("-", "_")
     if loc == "en_us":
@@ -64,13 +109,11 @@ def _locale_rank(locale: str) -> tuple[int, str]:
     return (10, loc)
 
 
-def _lang_names(zf: zipfile.ZipFile, names: Iterable[str]) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str], str], list[str]]:
-    """Resolve display names deterministically, preferring English locales.
-
-    ZIP member order is not a language preference. Legacy mods often package many
-    translations and may put zh_CN.lang before en_US.lang, so locale precedence is
-    explicit instead of relying on archive order.
-    """
+def _lang_names(
+    zf: zipfile.ZipFile,
+    names: Iterable[str],
+) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str], str], list[str]]:
+    """Resolve block display names deterministically, preferring English locales."""
     locale_maps: dict[str, dict[tuple[str, str], str]] = defaultdict(dict)
     seen_locales: set[str] = set()
 
@@ -107,8 +150,6 @@ def _lang_names(zf: zipfile.ZipFile, names: Iterable[str]) -> tuple[dict[tuple[s
             if not mm:
                 continue
             token = mm.group(1)
-            # Common 1.7.10 forms are tile.block_name.name and
-            # tile.modid.block_name.name. Preserve both interpretations.
             target[(ns, token)] = value
             if "." in token:
                 prefix, rest = token.split(".", 1)
@@ -124,28 +165,6 @@ def _lang_names(zf: zipfile.ZipFile, names: Iterable[str]) -> tuple[dict[tuple[s
                 locale_used[key] = locale
 
     return resolved, locale_used, sorted(seen_locales, key=_locale_rank)
-
-
-def _model_texture_refs(zf: zipfile.ZipFile, model_path: str) -> list[str]:
-    try:
-        obj = _safe_json(zf.read(model_path))
-    except Exception:
-        return []
-    if not isinstance(obj, dict):
-        return []
-    namespace = model_path.split("/", 2)[1]
-    textures = obj.get("textures")
-    out: list[str] = []
-    if isinstance(textures, dict):
-        for value in textures.values():
-            if not isinstance(value, str) or value.startswith("#"):
-                continue
-            if ":" in value:
-                ns, rel = value.split(":", 1)
-            else:
-                ns, rel = namespace, value
-            out.append(f"assets/{ns}/textures/{rel}.png")
-    return out
 
 
 def _class_utf8(cp, index: int) -> str:
@@ -166,12 +185,12 @@ def _class_name(cp, index: int) -> str:
     return _class_utf8(cp, entry[1])
 
 
-def _parse_class_structure(data: bytes):
-    """Return (class name, super name, fields) from a JVM class file.
+def _parse_class_structure(data: bytes) -> _ClassInfo:
+    """Parse enough JVM structure for static registry and inheritance analysis.
 
-    This intentionally parses only the constant-pool/header/field portion needed
-    to identify legacy Forge static Block declarations. It is not a bytecode
-    decompiler and does not execute mod code.
+    This parser never executes mod code. It intentionally records the constant-pool
+    UTF-8 strings as additional loader/registration evidence while skipping method
+    bytecode and attributes safely.
     """
     view = memoryview(data)
     pos = 0
@@ -180,7 +199,8 @@ def _parse_class_structure(data: bytes):
         nonlocal pos
         if pos + n > len(view):
             raise ValueError("truncated class file")
-        out = bytes(view[pos:pos+n]); pos += n
+        out = bytes(view[pos:pos + n])
+        pos += n
         return out
 
     def u1() -> int:
@@ -200,7 +220,7 @@ def _parse_class_structure(data: bytes):
     i = 1
     while i < cp_count:
         tag = u1()
-        if tag == 1:  # Utf8
+        if tag == 1:
             length = u2()
             cp[i] = ("Utf8", take(length).decode("utf-8", "replace"))
         elif tag in (3, 4):
@@ -226,9 +246,9 @@ def _parse_class_structure(data: bytes):
     super_name = _class_name(cp, super_class)
 
     for _ in range(u2()):
-        u2()  # interfaces
+        u2()
 
-    fields = []
+    fields: list[tuple[int, str, str]] = []
     for _ in range(u2()):
         field_access = u2(); name_index = u2(); desc_index = u2()
         attr_count = u2()
@@ -236,56 +256,280 @@ def _parse_class_structure(data: bytes):
             u2(); take(u4())
         fields.append((field_access, _class_utf8(cp, name_index), _class_utf8(cp, desc_index)))
 
-    return this_name, super_name, access_flags, fields
+    # Methods and class attributes are not needed, but consume them to reject
+    # truncated/corrupt class files deterministically.
+    for _ in range(u2()):
+        u2(); u2(); u2()
+        for _ in range(u2()):
+            u2(); take(u4())
+    for _ in range(u2()):
+        u2(); take(u4())
+
+    utf8 = tuple(entry[1] for entry in cp if entry and entry[0] == "Utf8")
+    return _ClassInfo(this_name, super_name, access_flags, fields, utf8)
 
 
-def _legacy_class_evidence(zf: zipfile.ZipFile, names: Iterable[str]) -> tuple[set[str], int, int]:
-    """Find probable legacy block fields without loading or executing the mod.
-
-    We build the inheritance graph from packaged classes, identify classes that
-    extend Minecraft Block/TileEntity, then inspect static fields whose declared
-    type is Block or a packaged Block subclass. Static block holder fields are a
-    much stronger 1.7.10 signal than texture filenames alone.
-    """
-    classes: dict[str, tuple[str, list[tuple[int, str, str]]]] = {}
+def _class_inventory(zf: zipfile.ZipFile, names: Iterable[str]) -> dict[str, _ClassInfo]:
+    classes: dict[str, _ClassInfo] = {}
     for name in names:
         if not name.endswith(".class"):
             continue
         try:
-            this_name, super_name, _access, fields = _parse_class_structure(zf.read(name))
+            info = _parse_class_structure(zf.read(name))
         except Exception:
             continue
-        if this_name:
-            classes[this_name] = (super_name, fields)
+        if info.name:
+            classes[info.name] = info
+    return classes
 
-    def descendants_of(base: str) -> set[str]:
-        found = {base}
-        changed = True
-        while changed:
-            changed = False
-            for cls, (super_name, _fields) in classes.items():
-                if cls not in found and super_name in found:
-                    found.add(cls); changed = True
-        return found
 
-    block_classes = descendants_of(_BLOCK_BASE)
-    tile_entity_classes = descendants_of(_TILE_ENTITY_BASE)
-    field_names: set[str] = set()
-    for _owner, (_super, fields) in classes.items():
-        for access, field_name, descriptor in fields:
+def _looks_like_external_block_class(name: str) -> bool:
+    if name in _BLOCK_BASES:
+        return True
+    # Legacy MCP puts vanilla Block subclasses under net.minecraft.block and
+    # names them BlockStairs/BlockSlab/etc. Modern Mojmap uses names such as
+    # StairBlock/SlabBlock in net.minecraft.world.level.block. These classes are
+    # not packaged inside a mod JAR, so seed them from their stable package/name
+    # shape instead of requiring their bytecode to be present.
+    if name.startswith("net/minecraft/block/Block"):
+        return True
+    if name.startswith("net/minecraft/world/level/block/") and name.rsplit("/", 1)[-1].endswith("Block"):
+        return True
+    return False
+
+
+def _descendants_of(classes: dict[str, _ClassInfo], bases: set[str], external_predicate=None) -> set[str]:
+    found = set(bases)
+    if external_predicate is not None:
+        for info in classes.values():
+            if external_predicate(info.super_name):
+                found.add(info.super_name)
+    changed = True
+    while changed:
+        changed = False
+        for cls, info in classes.items():
+            if cls not in found and (info.super_name in found or (external_predicate is not None and external_predicate(info.super_name))):
+                found.add(cls)
+                changed = True
+    return found
+
+
+def _looks_like_block_registry_enum(info: _ClassInfo) -> bool:
+    simple = info.name.rsplit("/", 1)[-1].lower()
+    name_signal = simple in {"modblocks", "blocks", "blockregistry", "blocklist", "blocktypes"} or simple.endswith("blocks")
+    cp = "\n".join(info.utf8)
+    registration_signal = (
+        "registerBlock" in cp
+        or "GameRegistry" in cp
+        or "net/minecraft/block/Block" in cp
+        or "net/minecraft/world/level/block/Block" in cp
+    )
+    return bool(info.access_flags & _ACC_ENUM) and name_signal and registration_signal
+
+
+def _class_evidence(classes: dict[str, _ClassInfo]) -> dict[str, Any]:
+    block_classes = _descendants_of(classes, _BLOCK_BASES, _looks_like_external_block_class)
+    block_entity_classes = _descendants_of(classes, _BLOCK_ENTITY_BASES)
+
+    # Published jars can use loader/version-specific Minecraft mappings. When the
+    # vanilla superclass name is not one of the known MCP/Mojmap/Yarn-named forms,
+    # preserve strong mod-class naming evidence rather than silently hiding a
+    # likely tile/block entity. This is advisory catalog data only and never grants
+    # conversion mapping authority by itself.
+    for class_name in classes:
+        simple = class_name.rsplit("/", 1)[-1].lower()
+        if simple.endswith("tileentity") or simple.endswith("blockentity"):
+            block_entity_classes.add(class_name)
+
+    static_block_fields: set[str] = set()
+    enum_block_fields: set[str] = set()
+    block_entity_type_fields: set[str] = set()
+
+    for owner, info in classes.items():
+        if _looks_like_block_registry_enum(info):
+            own_desc = f"L{owner};"
+            for access, field_name, descriptor in info.fields:
+                if field_name and (access & _ACC_STATIC) and (access & _ACC_ENUM) and descriptor == own_desc:
+                    enum_block_fields.add(field_name.lower())
+
+        for access, field_name, descriptor in info.fields:
             if not (access & _ACC_STATIC) or not field_name:
                 continue
-            if not (descriptor.startswith("L") and descriptor.endswith(";")):
-                continue
-            declared = descriptor[1:-1]
-            if declared in block_classes:
-                field_names.add(field_name)
+            if descriptor in _BLOCK_ENTITY_TYPE_DESCRIPTORS:
+                block_entity_type_fields.add(field_name)
+            if descriptor.startswith("L") and descriptor.endswith(";"):
+                declared = descriptor[1:-1]
+                if declared in block_classes:
+                    static_block_fields.add(field_name)
 
-    return field_names, max(0, len(block_classes) - 1), max(0, len(tile_entity_classes) - 1)
+    packaged_block_classes = sorted(c for c in block_classes if c not in _BLOCK_BASES)
+    packaged_block_entities = sorted(c for c in block_entity_classes if c not in _BLOCK_ENTITY_BASES)
+    return {
+        "static_block_fields": static_block_fields,
+        "enum_block_fields": enum_block_fields,
+        "block_classes": packaged_block_classes,
+        "block_entity_classes": packaged_block_entities,
+        "block_entity_type_fields": block_entity_type_fields,
+    }
+
+
+def _infer_loader_from_classes(classes: dict[str, _ClassInfo], manifest: dict[str, str]) -> str:
+    if manifest.get("FMLCorePlugin") or manifest.get("FMLAT"):
+        return "Forge/FML (legacy, inferred)"
+    joined = "\n".join(s for info in classes.values() for s in info.utf8)
+    if "cpw/mods/fml/common/Mod" in joined or "net/minecraftforge/fml/common/Mod" in joined:
+        return "Forge/FML (legacy, inferred)"
+    if "net/minecraftforge/fml/common/registry/GameRegistry" in joined or "cpw/mods/fml/common/registry/GameRegistry" in joined:
+        return "Forge/FML (legacy, inferred)"
+    if "net/minecraftforge/registries/DeferredRegister" in joined or "net/minecraftforge/fml/javafmlmod/FMLJavaModLoadingContext" in joined:
+        return "Forge (modern, inferred)"
+    if "net/fabricmc/api/ModInitializer" in joined or "net/fabricmc/fabric/api" in joined:
+        return "Fabric-style (inferred)"
+    return "unknown"
+
+
+def _detect_provider_role(mod_ids: list[str], mod_name: str, metadata: dict[str, Any]) -> tuple[str, str]:
+    ids = {x.strip().lower() for x in mod_ids if x.strip()}
+    if ids & _KNOWN_ARCHITECTURAL_IDS:
+        return "architectural_fallback", "Known architectural/content mod; use only through reviewed fallback rules."
+    if ids & _KNOWN_BACKPORT_IDS:
+        return "backport_provider", "Known vanilla-content backport provider."
+
+    description = ""
+    if isinstance(metadata, dict):
+        description = str(metadata.get("description") or "")
+        first = metadata.get("first_mod")
+        if isinstance(first, dict):
+            description += " " + str(first.get("description") or "")
+    hay = f"{mod_name} {description} {' '.join(ids)}".lower()
+    if any(token in hay for token in ("backport", "back port", "future to now", "brings the future", "up to date")):
+        return "backport_provider", "Mod metadata/name indicates a vanilla-version backport provider."
+    return "general", "General mod catalog."
+
+
+def _camel_to_snake(value: str) -> str:
+    value = value.replace("-", "_").replace(".", "_")
+    value = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value)
+    return re.sub(r"_+", "_", value).strip("_").lower()
+
+
+def _candidate_aliases(rel: str) -> list[str]:
+    aliases: list[str] = []
+    for candidate in (rel, _camel_to_snake(rel)):
+        candidate = candidate.strip("/").lower()
+        if candidate and candidate not in aliases:
+            aliases.append(candidate)
+    # Common holder-field prefix; deliberately conservative because provider
+    # aliases participate in automatic conversion decisions.
+    for candidate in list(aliases):
+        if candidate.startswith("block_") and candidate[6:]:
+            aliases.append(candidate[6:])
+    return aliases
 
 
 def _asset_stem(path: str) -> str:
     return PurePosixPath(path).stem
+
+
+def _normalized_asset_token(value: str) -> str:
+    value = _camel_to_snake(value.rsplit("/", 1)[-1])
+    for prefix in ("tile_entity_", "tileentity_", "block_entity_", "blockentity_", "model_"):
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+    return value
+
+
+def _infer_model_kind(rel: str, model_paths: list[str], blockstate_path: str) -> str:
+    token = rel.lower()
+    if any(x in token for x in ("sapling", "flower", "grass", "fern", "lichen", "roots", "vine", "seagrass", "kelp", "mushroom")):
+        return "cross"
+    if token.endswith("_slab"):
+        return "slab"
+    if token.endswith("_stairs"):
+        return "stairs"
+    if token.endswith("_wall"):
+        return "wall"
+    if token.endswith("_fence") or token.endswith("_fence_gate"):
+        return "fence"
+    if token.endswith("_pane") or "bars" in token:
+        return "pane"
+    if token.endswith("_door") or token.endswith("_trapdoor"):
+        return "thin"
+    if any(p.lower().endswith(".obj") for p in model_paths):
+        return "obj"
+    if any(p.lower().endswith(".json") for p in model_paths) or blockstate_path:
+        return "json"
+    if model_paths:
+        return "legacy_model"
+    return "cube"
+
+
+def _model_texture_refs(zf: zipfile.ZipFile, model_path: str) -> list[str]:
+    try:
+        obj = _safe_json(zf.read(model_path))
+    except Exception:
+        return []
+    if not isinstance(obj, dict):
+        return []
+    namespace = model_path.split("/", 2)[1]
+    textures = obj.get("textures")
+    out: list[str] = []
+    if isinstance(textures, dict):
+        for value in textures.values():
+            if not isinstance(value, str) or value.startswith("#"):
+                continue
+            if ":" in value:
+                ns, rel = value.split(":", 1)
+            else:
+                ns, rel = namespace, value
+            out.append(f"assets/{ns}/textures/{rel}.png")
+    return out
+
+
+def _blockstate_model_refs(zf: zipfile.ZipFile, blockstate_path: str) -> list[str]:
+    try:
+        obj = _safe_json(zf.read(blockstate_path))
+    except Exception:
+        return []
+    if not isinstance(obj, dict):
+        return []
+    refs: list[str] = []
+
+    def collect(value):
+        if isinstance(value, dict):
+            model = value.get("model")
+            if isinstance(model, str):
+                refs.append(model)
+        elif isinstance(value, list):
+            for part in value:
+                collect(part)
+
+    variants = obj.get("variants")
+    if isinstance(variants, dict):
+        for value in variants.values():
+            collect(value)
+    multipart = obj.get("multipart")
+    if isinstance(multipart, list):
+        for part in multipart:
+            if isinstance(part, dict):
+                collect(part.get("apply"))
+    return refs
+
+
+def _model_ref_to_path(ref: str, default_ns: str) -> str:
+    if ":" in ref:
+        ns, rel = ref.split(":", 1)
+    else:
+        ns, rel = default_ns, ref
+    return f"assets/{ns}/models/{rel}.json"
+
+
+def _metadata_from_mods_toml(parsed: dict[str, Any]) -> tuple[list[str], str, str]:
+    first = parsed.get("first_mod", {}) if isinstance(parsed, dict) else {}
+    if not isinstance(first, dict):
+        return [], "", ""
+    ids = [str(first["modId"])] if first.get("modId") else []
+    return ids, str(first.get("displayName") or ""), str(first.get("version") or "")
 
 
 def analyze_jar(path: str | Path, log=lambda *_: None) -> ModCatalog:
@@ -302,29 +546,50 @@ def analyze_jar_bytes(data: bytes, source_label: str, log=lambda *_: None) -> Mo
 def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None) -> ModCatalog:
     names = [n for n in zf.namelist() if not n.endswith("/")]
     name_set = set(names)
+    classes = _class_inventory(zf, names)
+    manifest = _manifest_values(zf.read("META-INF/MANIFEST.MF")) if "META-INF/MANIFEST.MF" in name_set else {}
+
     loader = "unknown"
-    metadata: dict = {}
+    metadata: dict[str, Any] = {}
     mod_ids: list[str] = []
     mod_name = ""
     mod_version = ""
     minecraft_hint = ""
 
-    if "META-INF/mods.toml" in name_set:
+    if "META-INF/neoforge.mods.toml" in name_set:
+        loader = "NeoForge"
+        metadata = _parse_mods_toml(zf.read("META-INF/neoforge.mods.toml"))
+        mod_ids, mod_name, mod_version = _metadata_from_mods_toml(metadata)
+    elif "META-INF/mods.toml" in name_set:
         loader = "Forge (1.13+)"
         metadata = _parse_mods_toml(zf.read("META-INF/mods.toml"))
-        first = metadata.get("first_mod", {}) if isinstance(metadata, dict) else {}
-        if isinstance(first, dict):
-            if first.get("modId"): mod_ids = [str(first["modId"])]
-            mod_name = str(first.get("displayName") or "")
-            mod_version = str(first.get("version") or "")
+        mod_ids, mod_name, mod_version = _metadata_from_mods_toml(metadata)
+    elif "quilt.mod.json" in name_set:
+        loader = "Quilt"
+        obj = _safe_json(zf.read("quilt.mod.json")) or {}
+        metadata = obj if isinstance(obj, dict) else {}
+        ql = obj.get("quilt_loader") if isinstance(obj, dict) else None
+        if isinstance(ql, dict):
+            if ql.get("id"): mod_ids = [str(ql["id"])]
+            meta = ql.get("metadata")
+            if isinstance(meta, dict): mod_name = str(meta.get("name") or "")
+            mod_version = str(ql.get("version") or "")
+        depends = ql.get("depends") if isinstance(ql, dict) else None
+        if isinstance(depends, list):
+            for dep in depends:
+                if isinstance(dep, dict) and dep.get("id") == "minecraft":
+                    minecraft_hint = str(dep.get("versions") or dep.get("version") or "")
     elif "fabric.mod.json" in name_set:
-        loader = "Fabric/Quilt-style"
+        loader = "Fabric"
         obj = _safe_json(zf.read("fabric.mod.json")) or {}
         metadata = obj if isinstance(obj, dict) else {}
         if isinstance(obj, dict):
             if obj.get("id"): mod_ids = [str(obj["id"])]
             mod_name = str(obj.get("name") or "")
             mod_version = str(obj.get("version") or "")
+            depends = obj.get("depends")
+            if isinstance(depends, dict) and "minecraft" in depends:
+                minecraft_hint = str(depends.get("minecraft") or "")
     elif "mcmod.info" in name_set:
         loader = "Forge/FML (legacy)"
         obj = _parse_mcmod(zf.read("mcmod.info"))
@@ -333,15 +598,29 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
         mod_name = str(obj.get("name") or "")
         mod_version = str(obj.get("version") or "")
         minecraft_hint = str(obj.get("mcversion") or obj.get("acceptedMinecraftVersions") or "")
-    elif any(n.startswith("META-INF/") and "neoforge" in n.lower() for n in names):
-        loader = "NeoForge-style"
+    elif "litemod.json" in name_set:
+        loader = "LiteLoader"
+        obj = _safe_json(zf.read("litemod.json")) or {}
+        metadata = obj if isinstance(obj, dict) else {}
+        if isinstance(obj, dict):
+            ident = obj.get("name") or obj.get("id")
+            if ident: mod_ids = [str(ident)]
+            mod_name = str(obj.get("displayName") or obj.get("name") or "")
+            mod_version = str(obj.get("version") or "")
+            minecraft_hint = str(obj.get("mcversion") or obj.get("revision") or "")
+    else:
+        loader = _infer_loader_from_classes(classes, manifest)
+        if loader != "unknown":
+            metadata = {"inferred_from_bytecode": True, "manifest": manifest}
 
     assets_namespaces = sorted({n.split("/", 2)[1] for n in names if n.startswith("assets/") and n.count("/") >= 2})
     if not mod_ids:
         mod_ids = [ns for ns in assets_namespaces if ns != "minecraft"][:8]
     primary_ns = mod_ids[0] if mod_ids else (assets_namespaces[0] if assets_namespaces else "minecraft")
 
-    log(f"Reading assets from {source_label}")
+    provider_role, provider_reason = _detect_provider_role(mod_ids, mod_name, metadata)
+    log(f"Reading assets/classes from {source_label}")
+
     display_names, display_locales, locales_found = _lang_names(zf, names)
     textures: dict[tuple[str, str], list[str]] = defaultdict(list)
     modern_models: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -367,21 +646,27 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
         if m:
             blockstates[(m.group(1), m.group(2))] = name
 
-    legacy_fields: set[str] = set()
-    block_subclass_count = 0
-    tile_entity_class_count = 0
-    if loader == "Forge/FML (legacy)":
-        legacy_fields, block_subclass_count, tile_entity_class_count = _legacy_class_evidence(zf, names)
-        if legacy_fields:
-            log(f"Legacy class evidence: {len(legacy_fields):,} static Block fields; {len(all_model_assets):,} packaged model assets")
+    class_ev = _class_evidence(classes)
+    static_fields: set[str] = class_ev["static_block_fields"]
+    enum_fields: set[str] = class_ev["enum_block_fields"]
+    legacy_fields = static_fields | enum_fields
+    block_entity_classes: list[str] = class_ev["block_entity_classes"]
 
-    keys: set[tuple[str, str]]
-    class_backed: set[tuple[str, str]] = set()
     if legacy_fields:
-        class_backed = {(primary_ns, field) for field in legacy_fields}
-        # Keep any modern-style blockstates as authoritative if a hybrid legacy
-        # mod happens to package them, but do not promote every texture file to a
-        # registered block candidate when class evidence is available.
+        log(
+            "Class registry evidence: %d static Block field(s), %d enum-backed block registration(s), %d block entity class(es)"
+            % (len(static_fields), len(enum_fields), len(block_entity_classes))
+        )
+
+    # A dedicated enum registry is stronger than miscellaneous static Block
+    # caches elsewhere in the same JAR. When one is present (Et Futurum is the
+    # motivating example), use the enum entries as the registration candidate
+    # set and retain static-field counts only as supporting diagnostics.
+    registry_fields = enum_fields if enum_fields else static_fields
+    class_backed: set[tuple[str, str]] = {(primary_ns, field) for field in registry_fields}
+    if class_backed:
+        # Modern blockstates remain authoritative in hybrid jars. With strong legacy
+        # class evidence, do not promote every decorative textures/blocks PNG to a block.
         keys = set(blockstates) | class_backed
     else:
         keys = set(blockstates) | set(modern_models) | set(textures)
@@ -392,10 +677,16 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
         bs = blockstates.get((ns, rel), "")
         model_list = list(modern_models.get((ns, rel), []))
         tex_list = list(textures.get((ns, rel), []))
-        is_class_backed = (ns, rel) in class_backed
+        is_static = rel in static_fields and rel in registry_fields and ns == primary_ns
+        is_enum = rel in enum_fields and ns == primary_ns
+        is_class_backed = is_static or is_enum
 
-        # Legacy OBJ/DAE/HMF models are not under the modern models/block/*.json
-        # convention. Associate an exact-stem model with a class-backed block.
+        if bs:
+            for model_ref in _blockstate_model_refs(zf, bs):
+                mp = _model_ref_to_path(model_ref, ns)
+                if mp in name_set and mp not in model_list:
+                    model_list.append(mp)
+
         if is_class_backed:
             for mp in all_models_by_stem.get((ns, rel), []):
                 if mp not in model_list:
@@ -406,16 +697,20 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
             confidence = "high"
             evidence = "blockstate JSON"
             candidate_kind = "registered block candidate"
-        elif is_class_backed:
-            has_supporting_asset = bool(model_list or tex_list or display_names.get((ns, rel)))
-            confidence = "high" if has_supporting_asset else "medium"
+        elif is_enum:
+            confidence = "high" if (model_list or tex_list or display_names.get((ns, rel))) else "medium"
+            pieces = ["legacy enum block registry entry"]
+            if model_list: pieces.append("packaged model")
+            if tex_list: pieces.append("matching block texture")
+            if display_names.get((ns, rel)): pieces.append("localization entry")
+            evidence = " + ".join(pieces)
+            candidate_kind = "registered block candidate"
+        elif is_static:
+            confidence = "high" if (model_list or tex_list or display_names.get((ns, rel))) else "medium"
             pieces = ["legacy static Block field"]
-            if model_list:
-                pieces.append("packaged legacy model")
-            if tex_list:
-                pieces.append("matching block texture")
-            if display_names.get((ns, rel)):
-                pieces.append("localization entry")
+            if model_list: pieces.append("packaged model")
+            if tex_list: pieces.append("matching block texture")
+            if display_names.get((ns, rel)): pieces.append("localization entry")
             evidence = " + ".join(pieces)
             candidate_kind = "registered block candidate"
         elif model_list:
@@ -438,52 +733,90 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
         if not display:
             display = rel.replace("_", " ").replace("/", " / ").title()
 
+        model_list = sorted(set(model_list))
+        tex_list = sorted(set(tex_list))
         blocks.append(BlockAsset(
             namespace=ns,
             registry_hint=f"{ns}:{rel}",
             display_name=display,
             confidence=confidence,
             evidence=evidence,
-            texture_paths=sorted(set(tex_list)),
-            model_paths=sorted(set(model_list)),
+            texture_paths=tex_list,
+            model_paths=model_list,
             blockstate_path=bs,
             source_mod=(mod_ids[0] if mod_ids else ns),
             source_file=source_label,
             candidate_kind=candidate_kind,
             localization_locale=locale_used,
+            mapping_aliases=_candidate_aliases(rel),
+            model_kind=_infer_model_kind(rel, model_list, bs),
         ))
 
-    notes = []
-    if loader == "Forge/FML (legacy)":
-        if legacy_fields:
-            notes.append(
-                f"Legacy class-file analysis found {len(legacy_fields):,} static Block fields. "
-                "These are used as stronger block candidates instead of treating every textures/blocks PNG as a registered block."
-            )
-        else:
-            notes.append(
-                "No static legacy Block-field evidence could be recovered, so texture/model names remain heuristic candidates and may not equal GameRegistry names."
-            )
+    # Block/tile entity classes do not always expose a stable registry name in
+    # bytecode, so class identity is kept distinct from an optional registry hint.
+    block_entities: list[BlockEntityAsset] = []
+    for class_name in block_entity_classes:
+        simple = class_name.rsplit("/", 1)[-1]
+        token = _normalized_asset_token(simple)
+        model_matches: list[str] = []
+        texture_matches: list[str] = []
+        for (ns, stem), paths in all_models_by_stem.items():
+            if ns == primary_ns and _normalized_asset_token(stem) == token:
+                model_matches.extend(paths)
+                associated_model_assets.update(paths)
+        for (ns, rel), paths in textures.items():
+            if ns == primary_ns and _normalized_asset_token(rel) == token:
+                texture_matches.extend(paths)
+        display = re.sub(r"(?<!^)(?=[A-Z])", " ", simple)
+        display = re.sub(r"^(Tile Entity|Block Entity)\s*", "", display, flags=re.I).strip() or simple
+        block_entities.append(BlockEntityAsset(
+            namespace=primary_ns,
+            class_name=class_name.replace("/", "."),
+            registry_hint="",
+            display_name=display,
+            confidence="high" if (model_matches or texture_matches) else "medium",
+            evidence="packaged TileEntity/BlockEntity subclass" + (" + matching static model asset" if model_matches else ""),
+            texture_paths=sorted(set(texture_matches)),
+            model_paths=sorted(set(model_matches)),
+            source_mod=(mod_ids[0] if mod_ids else primary_ns),
+            source_file=source_label,
+        ))
+
+    notes: list[str] = []
+    if loader.endswith("inferred)"):
+        notes.append("No standard mod metadata file was required: the loader family was inferred from packaged class/manifest evidence.")
+    if static_fields:
+        notes.append(f"Class analysis found {len(static_fields):,} static Block holder field(s), including fields declared as packaged Block subclasses.")
+    if enum_fields:
         notes.append(
-            f"Legacy model scan found {len(all_model_assets):,} packaged model assets across JSON/OBJ/DAE/HMF/TCN formats; "
-            f"{len(associated_model_assets):,} were directly associated with block candidates by exact asset name."
+            f"Class analysis found {len(enum_fields):,} enum-backed block registry entries. This covers registry styles such as Et Futurum Requiem's ModBlocks enum that older analyzer builds missed."
         )
-        if tile_entity_class_count:
-            notes.append(
-                f"Detected {tile_entity_class_count:,} packaged TileEntity subclasses. Their presence is recorded as legacy rendering/data evidence; "
-                "full tile-entity model binding and in-game 3D rendering are not implemented yet."
-            )
+    if block_entity_classes:
+        notes.append(
+            f"Detected {len(block_entity_classes):,} packaged TileEntity/BlockEntity subclass(es). They are shown separately from blocks; static analysis does not invent a registry ID when the JAR does not expose one safely."
+        )
+    notes.append(
+        f"Model scan found {len(all_model_assets):,} packaged JSON/OBJ/DAE/HMF/TCN model assets; {len(associated_model_assets):,} were associated directly with a block or block-entity candidate."
+    )
     notes.append("Display names prefer en_US, then other English locales, then non-English translations only as a final fallback.")
-    notes.append("Texture previews show packaged block assets. Full in-game 3D model rendering is not implemented in this version.")
+    notes.append(
+        "The desktop preview renders static packaged JSON geometry, OBJ geometry, or an isometric texture/model fallback. Runtime TESRs/BERs and code-generated models are not executed by the analyzer."
+    )
+    if provider_role == "backport_provider":
+        notes.append("This catalog is classified as a backport provider. Exact same-name registered blocks can outrank approximate HBM/vanilla fallbacks when the target world registry confirms that block is actually enabled.")
 
     analysis_stats = {
         "packaged_block_textures": sum(len(v) for v in textures.values()),
         "packaged_model_assets": len(all_model_assets),
         "associated_model_assets": len(associated_model_assets),
-        "legacy_static_block_fields": len(legacy_fields),
-        "legacy_block_subclasses": block_subclass_count,
-        "legacy_tile_entity_subclasses": tile_entity_class_count,
+        "legacy_static_block_fields": len(static_fields),
+        "legacy_enum_block_entries": len(enum_fields),
+        "legacy_block_subclasses": len(class_ev["block_classes"]),
+        "legacy_tile_entity_subclasses": len(block_entity_classes),
+        "packaged_block_entity_classes": len(block_entity_classes),
+        "block_entity_type_fields": len(class_ev["block_entity_type_fields"]),
         "locales_found": locales_found,
+        "provider_role": provider_role,
     }
 
     return ModCatalog(
@@ -494,12 +827,182 @@ def analyze_zipfile(zf: zipfile.ZipFile, source_label: str, log=lambda *_: None)
         mod_name=mod_name,
         mod_version=mod_version,
         blocks=blocks,
+        block_entities=block_entities,
         notes=notes,
         raw_metadata=metadata if isinstance(metadata, dict) else {},
         analysis_stats=analysis_stats,
+        provider_role=provider_role,
+        provider_reason=provider_reason,
     )
 
 
-def read_texture_bytes(jar_path: str | Path, texture_path: str) -> bytes:
+def read_asset_bytes(jar_path: str | Path, asset_path: str) -> bytes:
     with zipfile.ZipFile(jar_path, "r") as zf:
-        return zf.read(texture_path)
+        return zf.read(asset_path)
+
+
+def read_texture_bytes(jar_path: str | Path, texture_path: str) -> bytes:
+    return read_asset_bytes(jar_path, texture_path)
+
+
+def _resolve_json_model(zf: zipfile.ZipFile, model_path: str, max_depth: int = 12) -> dict[str, Any]:
+    """Resolve a packaged JSON model's parent chain without needing Minecraft."""
+    name_set = set(zf.namelist())
+    merged_textures: dict[str, str] = {}
+    elements = None
+    parent = ""
+    current = model_path
+    seen: set[str] = set()
+    depth = 0
+    while current and current not in seen and depth < max_depth:
+        seen.add(current); depth += 1
+        try:
+            obj = _safe_json(zf.read(current))
+        except Exception:
+            break
+        if not isinstance(obj, dict):
+            break
+        textures = obj.get("textures")
+        if isinstance(textures, dict):
+            # Child values should win over parent values.
+            merged_textures = {**{str(k): str(v) for k, v in textures.items() if isinstance(v, str)}, **merged_textures}
+        if elements is None and isinstance(obj.get("elements"), list):
+            elements = obj.get("elements")
+        p = obj.get("parent")
+        if not isinstance(p, str) or not p:
+            parent = parent or ""
+            break
+        parent = parent or p
+        ns = current.split("/", 2)[1] if current.startswith("assets/") else "minecraft"
+        next_path = _model_ref_to_path(p, ns)
+        if next_path not in name_set:
+            # Vanilla parent models are normally outside the mod JAR; preserving
+            # the parent identifier is enough to infer a static preview shape.
+            break
+        current = next_path
+    return {"textures": merged_textures, "elements": elements or [], "parent": parent}
+
+
+def _parse_obj_geometry(raw: bytes) -> tuple[list[list[float]], list[list[int]]]:
+    vertices: list[list[float]] = []
+    faces: list[list[int]] = []
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if line.startswith("v "):
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                except ValueError:
+                    pass
+        elif line.startswith("f "):
+            indexes: list[int] = []
+            for part in line.split()[1:]:
+                try:
+                    idx = int(part.split("/", 1)[0])
+                    if idx < 0:
+                        idx = len(vertices) + idx
+                    else:
+                        idx -= 1
+                    if 0 <= idx < len(vertices):
+                        indexes.append(idx)
+                except ValueError:
+                    continue
+            if len(indexes) >= 3:
+                faces.append(indexes)
+    return vertices, faces
+
+
+def build_preview_spec(jar_path: str | Path, candidate: Any) -> dict[str, Any]:
+    """Build a safe static preview description for one analyzer row.
+
+    The returned data is Qt-independent and intentionally bounded. It supports
+    ordinary block JSON, packaged OBJ geometry, and shape-aware isometric
+    fallbacks. Custom runtime renderers are represented rather than executed.
+    """
+    if hasattr(candidate, "__dict__"):
+        data = dict(candidate.__dict__)
+    elif isinstance(candidate, dict):
+        data = dict(candidate)
+    else:
+        raise TypeError("preview candidate must be a catalog asset")
+
+    textures = [str(x) for x in (data.get("texture_paths") or [])]
+    models = [str(x) for x in (data.get("model_paths") or [])]
+    blockstate = str(data.get("blockstate_path") or "")
+    registry = str(data.get("registry_hint") or data.get("class_name") or "")
+    model_kind = str(data.get("model_kind") or "")
+
+    with zipfile.ZipFile(jar_path, "r") as zf:
+        names = set(zf.namelist())
+        if blockstate and blockstate in names:
+            default_ns = blockstate.split("/", 2)[1]
+            for ref in _blockstate_model_refs(zf, blockstate):
+                mp = _model_ref_to_path(ref, default_ns)
+                if mp in names and mp not in models:
+                    models.append(mp)
+
+        json_model = next((m for m in models if m.lower().endswith(".json") and m in names), "")
+        obj_model = next((m for m in models if m.lower().endswith(".obj") and m in names), "")
+        if json_model:
+            resolved = _resolve_json_model(zf, json_model)
+            ns = json_model.split("/", 2)[1]
+            for value in resolved.get("textures", {}).values():
+                if not isinstance(value, str) or value.startswith("#"):
+                    continue
+                if ":" in value:
+                    tns, rel = value.split(":", 1)
+                else:
+                    tns, rel = ns, value
+                tp = f"assets/{tns}/textures/{rel}.png"
+                if tp in names and tp not in textures:
+                    textures.append(tp)
+            parent = str(resolved.get("parent") or "").lower()
+            shape = model_kind or "json"
+            if "cross" in parent:
+                shape = "cross"
+            elif "slab" in parent:
+                shape = "slab"
+            elif "stairs" in parent:
+                shape = "stairs"
+            elif "fence" in parent:
+                shape = "fence"
+            elif "pane" in parent or "bars" in parent:
+                shape = "pane"
+            elif resolved.get("elements"):
+                shape = "elements"
+            elif shape in {"json", ""}:
+                shape = "cube"
+            return {
+                "kind": shape,
+                "registry": registry,
+                "model_path": json_model,
+                "texture_paths": textures,
+                "elements": resolved.get("elements") or [],
+                "parent": resolved.get("parent") or "",
+                "note": "Static JSON model preview",
+            }
+
+        if obj_model:
+            vertices, faces = _parse_obj_geometry(zf.read(obj_model))
+            if vertices and faces:
+                return {
+                    "kind": "obj",
+                    "registry": registry,
+                    "model_path": obj_model,
+                    "texture_paths": textures,
+                    "vertices": vertices,
+                    "faces": faces,
+                    "note": "Static OBJ geometry preview",
+                }
+
+    shape = model_kind or "cube"
+    if shape in {"json", "legacy_model", "obj", ""}:
+        shape = "cube" if textures else "asset"
+    return {
+        "kind": shape,
+        "registry": registry,
+        "model_path": models[0] if models else "",
+        "texture_paths": textures,
+        "note": "Shape-aware static asset preview" if textures or models else "No packaged static model/texture was linked",
+    }
