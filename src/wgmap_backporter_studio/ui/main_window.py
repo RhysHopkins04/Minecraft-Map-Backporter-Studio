@@ -11,7 +11,7 @@ from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMainWindow,
+    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
     QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 )
@@ -53,12 +53,20 @@ def _title(text: str, subtitle: str) -> QVBoxLayout:
 
 
 class _AdaptiveHeaderTable(QTableWidget):
-    """QTableWidget that refits analyzer columns when the viewport width changes."""
+    """QTableWidget with readable headers and width-aware automatic fitting.
+
+    The fitter runs when the table itself changes width. Manual column changes
+    are remembered as the user's preferred widths and are not immediately
+    overwritten merely because a scrollbar or selection state changes.
+    """
 
     def resizeEvent(self, event):
+        previous_width = getattr(self, "_wg_last_outer_width", None)
+        new_width = event.size().width()
         super().resizeEvent(event)
+        self._wg_last_outer_width = new_width
         fitter = getattr(self, "_wg_fit_header_columns", None)
-        if fitter is not None:
+        if fitter is not None and (previous_width is None or previous_width != new_width):
             fitter()
 
 
@@ -71,13 +79,14 @@ def _configure_resizable_columns(
     table: QTableWidget,
     labels: tuple[str, ...],
 ) -> None:
-    """Keep analyzer headings compact, readable, and responsive.
+    """Keep analyzer headings compact, readable, responsive, and user-adjustable.
 
-    Every column uses the same text-relative policy: enough room for the rendered
-    heading plus Qt's sort indicator/padding, then a small consistent comfort
-    margin. Columns automatically contract toward that readable minimum when the
-    window narrows and use horizontal scrolling only when the minimums cannot fit.
-    Users can still resize columns manually, but not below the readable floor.
+    Each heading receives the same text-relative readable floor and comfort
+    margin. The initial/automatic layout fits those preferred widths into the
+    viewport; when the window narrows, columns contract only as far as their
+    readable floors. User-resized widths are remembered and restored when room
+    becomes available again instead of being overwritten by incidental viewport
+    changes.
     """
     table.setHorizontalHeaderLabels(list(labels))
     table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -98,17 +107,22 @@ def _configure_resizable_columns(
     header.setMinimumSectionSize(min(minimums))
     table._wg_header_minimums = minimums
     table._wg_header_preferreds = preferreds
+    table._wg_header_desireds = list(preferreds)
     clamp_guard = {"active": False}
     fit_guard = {"active": False}
 
     def keep_readable(index: int, _old_size: int, new_size: int) -> None:
-        if clamp_guard["active"] or index >= len(minimums) or new_size >= minimums[index]:
+        if fit_guard["active"] or clamp_guard["active"] or index >= len(minimums):
             return
-        clamp_guard["active"] = True
-        try:
-            header.resizeSection(index, minimums[index])
-        finally:
-            clamp_guard["active"] = False
+        if new_size < minimums[index]:
+            clamp_guard["active"] = True
+            try:
+                table._wg_header_desireds[index] = minimums[index]
+                header.resizeSection(index, minimums[index])
+            finally:
+                clamp_guard["active"] = False
+            return
+        table._wg_header_desireds[index] = new_size
 
     def fit_columns_to_view() -> None:
         if fit_guard["active"]:
@@ -116,18 +130,23 @@ def _configure_resizable_columns(
         fit_guard["active"] = True
         try:
             available = max(0, table.viewport().width() - 2)
+            desireds = tuple(max(minimum, desired) for minimum, desired in zip(minimums, table._wg_header_desireds))
             minimum_total = sum(minimums)
-            preferred_total = sum(preferreds)
+            desired_total = sum(desireds)
 
             if available <= minimum_total:
                 widths = minimums
-            elif available >= preferred_total:
-                widths = preferreds
+            elif available >= desired_total:
+                widths = desireds
             else:
-                fraction = (available - minimum_total) / max(1, preferred_total - minimum_total)
+                # Shrink each column by the same fraction of its available
+                # comfort/extra width, preserving relative user choices while
+                # never crossing a heading's readable floor.
+                shrinkable = max(1, desired_total - minimum_total)
+                keep_fraction = (available - minimum_total) / shrinkable
                 widths = tuple(
-                    minimum + round((preferred - minimum) * fraction)
-                    for minimum, preferred in zip(minimums, preferreds)
+                    minimum + round((desired - minimum) * keep_fraction)
+                    for minimum, desired in zip(minimums, desireds)
                 )
 
             for index, width in enumerate(widths):
@@ -138,7 +157,6 @@ def _configure_resizable_columns(
     header.sectionResized.connect(keep_readable)
     table._wg_fit_header_columns = fit_columns_to_view
     fit_columns_to_view()
-
 
 def _path_row(parent, label: str, mode: str, target: QLineEdit, file_filter: str = "All files (*)"):
     wrap = QWidget(parent); lay = QHBoxLayout(wrap); lay.setContentsMargins(0, 0, 0, 0)
@@ -411,11 +429,20 @@ class JarAnalyzerTab(AsyncTab):
         self.launch(work, done, err)
 
     def _show_catalog(self, cat):
-        self.summary.setText(f"{cat.mod_name or Path(cat.source).name} • {cat.loader_hint} • {cat.mod_version or 'version unknown'} • {len(cat.blocks):,} block asset candidates")
+        stats = cat.analysis_stats or {}
+        model_count = int(stats.get("packaged_model_assets", 0) or 0)
+        tile_count = int(stats.get("legacy_tile_entity_subclasses", 0) or 0)
+        model_text = f" • {model_count:,} packaged models" if model_count else ""
+        tile_text = f" • {tile_count:,} TileEntity classes" if tile_count else ""
+        self.summary.setText(f"{cat.mod_name or Path(cat.source).name} • {cat.loader_hint} • {cat.mod_version or 'version unknown'} • {len(cat.blocks):,} block candidates{model_text}{tile_text}")
         self.table.setSortingEnabled(False); self.table.setRowCount(len(cat.blocks))
         for r, b in enumerate(cat.blocks):
             vals = [b.registry_hint, b.display_name, b.confidence, b.evidence, str(len(b.texture_paths)), str(len(b.model_paths))]
-            for c, v in enumerate(vals): self.table.setItem(r, c, QTableWidgetItem(v))
+            for c, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                if c == 0:
+                    item.setData(Qt.UserRole, r)
+                self.table.setItem(r, c, item)
         self.table.setSortingEnabled(True)
         self.notes.setPlainText("\n".join(cat.notes)); self.export.setEnabled(True); self.preview.setText("Select a block to preview its first packaged texture.")
 
@@ -423,7 +450,12 @@ class JarAnalyzerTab(AsyncTab):
         if not self.catalog: return
         rows = self.table.selectionModel().selectedRows()
         if not rows: return
-        b = self.catalog.blocks[rows[0].row()]
+        table_row = rows[0].row()
+        anchor = self.table.item(table_row, 0)
+        source_index = anchor.data(Qt.UserRole) if anchor is not None else None
+        if not isinstance(source_index, int) or not (0 <= source_index < len(self.catalog.blocks)):
+            return
+        b = self.catalog.blocks[source_index]
         if not b.texture_paths:
             self.preview.setPixmap(QPixmap()); self.preview.setText("No direct PNG texture was linked to this candidate."); return
         try:
@@ -489,39 +521,235 @@ class ModpackAnalyzerTab(AsyncTab):
 
 class CatalogTab(QWidget):
     def __init__(self):
-        super().__init__(); self.rows = []
+        super().__init__()
+        self.sources: list[dict] = []
+        self._source_serial = 0
         root = QVBoxLayout(self); root.addLayout(_title(
             "Catalog Workspace",
-            "Load a JAR or modpack analysis JSON and search the candidate target blocks while planning mapping profiles."
+            "Combine multiple exported mod catalogs or modpack analyses, toggle individual sources on/off, and search the active target-block pool."
         ))
-        top = QHBoxLayout(); self.path = QLineEdit(); self.path.setReadOnly(True); load = QPushButton("Load catalog…"); self.search = QLineEdit(); self.search.setPlaceholderText("Search registry, display name, mod or evidence…")
-        top.addWidget(self.path, 1); top.addWidget(load); top.addWidget(self.search, 1); root.addLayout(top)
+
+        toolbar = QHBoxLayout()
+        add = QPushButton("Add catalog(s)…")
+        remove = QPushButton("Remove selected")
+        clear = QPushButton("Clear all")
+        save = QPushButton("Save workspace…")
+        self.search = QLineEdit(); self.search.setPlaceholderText("Search registry, display name, mod, candidate kind or evidence…")
+        toolbar.addWidget(add); toolbar.addWidget(remove); toolbar.addWidget(clear); toolbar.addWidget(save)
+        toolbar.addSpacing(10); toolbar.addWidget(self.search, 1)
+        root.addLayout(toolbar)
+
+        self.summary = _muted("No catalogs loaded yet.")
+        root.addWidget(self.summary)
+
+        splitter = QSplitter(Qt.Horizontal)
+        source_panel = QGroupBox("Loaded catalogs")
+        source_layout = QVBoxLayout(source_panel)
+        source_layout.addWidget(_muted("Checked catalogs contribute blocks to the active workspace."))
+        self.source_list = QListWidget()
+        self.source_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        source_layout.addWidget(self.source_list, 1)
+        source_panel.setMinimumWidth(260)
+        splitter.addWidget(source_panel)
+
         self.table = _AdaptiveHeaderTable(0, 6)
         catalog_labels = ("Registry", "Display", "Mod", "Confidence", "Evidence", "Texture assets")
         _configure_resizable_columns(self.table, catalog_labels)
-        self.table.setSortingEnabled(True); root.addWidget(self.table, 1)
-        load.clicked.connect(self._load); self.search.textChanged.connect(self._filter)
-    def _load(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Load block catalog", str(Path.home()), "JSON (*.json);;All files (*)")
-        if not p: return
-        try:
-            data = load_catalog(p); self.path.setText(p); rows = []
-            if data.get("kind") == "mod_block_catalog": rows = data.get("blocks", [])
-            elif data.get("kind") == "modpack_block_analysis":
-                for cat in data.get("block_catalogs", []): rows.extend(cat.get("blocks", []))
-            else: raise ValueError("This JSON is not a WG block catalog or modpack analysis.")
-            self.rows = rows; self._filter()
-        except Exception as e: QMessageBox.critical(self, "Catalog load failed", str(e))
-    def _filter(self):
-        q = self.search.text().strip().lower(); rows = []
-        for b in self.rows:
-            hay = " ".join(str(b.get(k, "")) for k in ("registry_hint","display_name","source_mod","confidence","evidence")).lower()
-            if not q or q in hay: rows.append(b)
-        self.table.setSortingEnabled(False); self.table.setRowCount(len(rows))
-        for r, b in enumerate(rows):
-            vals = [b.get("registry_hint",""), b.get("display_name",""), b.get("source_mod",""), b.get("confidence",""), b.get("evidence",""), str(len(b.get("texture_paths",[]) or []))]
-            for c, v in enumerate(vals): self.table.setItem(r, c, QTableWidgetItem(str(v)))
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSortingEnabled(True)
+        splitter.addWidget(self.table)
+        splitter.setChildrenCollapsible(False)
+        splitter.setSizes([300, 900])
+        root.addWidget(splitter, 1)
+
+        add.clicked.connect(self._load)
+        remove.clicked.connect(self._remove_selected)
+        clear.clicked.connect(self._clear)
+        save.clicked.connect(self._save_workspace)
+        self.search.textChanged.connect(self._refresh)
+        self.source_list.itemChanged.connect(self._source_toggled)
+
+    def _catalog_label(self, catalog: dict, fallback: str = "Catalog") -> str:
+        name = str(catalog.get("mod_name") or "").strip()
+        mod_ids = catalog.get("mod_ids") or []
+        mod_id = str(mod_ids[0]) if isinstance(mod_ids, list) and mod_ids else ""
+        version = str(catalog.get("mod_version") or "").strip()
+        base = name or mod_id or fallback
+        if version:
+            return f"{base} • {version}"
+        return base
+
+    def _catalog_identity(self, catalog: dict) -> str:
+        source = str(catalog.get("source") or "")
+        mod_ids = catalog.get("mod_ids") or []
+        mod_id = str(mod_ids[0]) if isinstance(mod_ids, list) and mod_ids else ""
+        version = str(catalog.get("mod_version") or "")
+        return f"{source}\n{mod_id}\n{version}"
+
+    def _append_catalog(self, catalog: dict, enabled: bool = True, fallback: str = "Catalog") -> bool:
+        if not isinstance(catalog, dict) or catalog.get("kind") != "mod_block_catalog":
+            return False
+        identity = self._catalog_identity(catalog)
+        for source in self.sources:
+            if source["identity"] == identity:
+                # Re-loading the exact same catalog should not silently duplicate
+                # every block row. Re-enable the existing source instead.
+                source["enabled"] = True
+                item = source.get("item")
+                if item is not None:
+                    item.setCheckState(Qt.Checked)
+                return False
+
+        self._source_serial += 1
+        source_id = self._source_serial
+        entry = {
+            "id": source_id,
+            "identity": identity,
+            "label": self._catalog_label(catalog, fallback),
+            "catalog": catalog,
+            "enabled": bool(enabled),
+        }
+        item = QListWidgetItem(entry["label"])
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        item.setCheckState(Qt.Checked if enabled else Qt.Unchecked)
+        item.setData(Qt.UserRole, source_id)
+        source_path = str(catalog.get("source") or "")
+        stats = catalog.get("analysis_stats") or {}
+        details = [source_path] if source_path else []
+        if stats:
+            details.append(f"{len(catalog.get('blocks', []) or []):,} block candidates")
+            if stats.get("packaged_model_assets"):
+                details.append(f"{int(stats['packaged_model_assets']):,} packaged models")
+        item.setToolTip("\n".join(details))
+        entry["item"] = item
+        self.sources.append(entry)
+        self.source_list.addItem(item)
+        return True
+
+    def _ingest_document(self, data: dict, fallback: str) -> int:
+        kind = data.get("kind")
+        added = 0
+        if kind == "mod_block_catalog":
+            added += int(self._append_catalog(data, True, fallback))
+        elif kind == "modpack_block_analysis":
+            for cat in data.get("block_catalogs", []) or []:
+                added += int(self._append_catalog(cat, True, fallback))
+        elif kind == "catalog_workspace":
+            for source in data.get("sources", []) or []:
+                if not isinstance(source, dict):
+                    continue
+                cat = source.get("catalog")
+                if isinstance(cat, dict):
+                    added += int(self._append_catalog(cat, bool(source.get("enabled", True)), fallback))
+        else:
+            raise ValueError("This JSON is not a WG block catalog, modpack analysis, or catalog workspace.")
+        return added
+
+    def _load(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add block catalogs or analyses", str(Path.home()), "JSON (*.json);;All files (*)")
+        if not paths:
+            return
+        added = 0
+        errors = []
+        for p in paths:
+            try:
+                data = load_catalog(p)
+                added += self._ingest_document(data, Path(p).stem)
+            except Exception as exc:
+                errors.append(f"{Path(p).name}: {exc}")
+        self._refresh()
+        if errors:
+            QMessageBox.warning(self, "Some catalogs could not be loaded", "\n".join(errors))
+        elif not added:
+            QMessageBox.information(self, "Catalogs already loaded", "The selected catalog data was already present in this workspace; the existing source was re-enabled.")
+
+    def _source_toggled(self, item: QListWidgetItem):
+        source_id = item.data(Qt.UserRole)
+        for source in self.sources:
+            if source["id"] == source_id:
+                source["enabled"] = item.checkState() == Qt.Checked
+                break
+        self._refresh()
+
+    def _remove_selected(self):
+        selected_ids = {item.data(Qt.UserRole) for item in self.source_list.selectedItems()}
+        if not selected_ids:
+            return
+        self.sources = [source for source in self.sources if source["id"] not in selected_ids]
+        for row in range(self.source_list.count() - 1, -1, -1):
+            if self.source_list.item(row).data(Qt.UserRole) in selected_ids:
+                self.source_list.takeItem(row)
+        self._refresh()
+
+    def _clear(self):
+        if not self.sources:
+            return
+        self.sources.clear()
+        self.source_list.clear()
+        self._refresh()
+
+    def _active_rows(self) -> list[dict]:
+        rows: list[dict] = []
+        for source in self.sources:
+            if not source["enabled"]:
+                continue
+            blocks = source["catalog"].get("blocks", []) or []
+            rows.extend(block for block in blocks if isinstance(block, dict))
+        return rows
+
+    def _refresh(self):
+        active_rows = self._active_rows()
+        q = self.search.text().strip().lower()
+        rows = []
+        for block in active_rows:
+            hay = " ".join(str(block.get(k, "")) for k in (
+                "registry_hint", "display_name", "source_mod", "confidence", "evidence", "candidate_kind", "localization_locale"
+            )).lower()
+            if not q or q in hay:
+                rows.append(block)
+
+        enabled = sum(1 for source in self.sources if source["enabled"])
+        self.summary.setText(
+            f"{len(self.sources):,} catalog source(s) loaded • {enabled:,} enabled • "
+            f"{len(active_rows):,} active block candidates • {len(rows):,} shown"
+            if self.sources else "No catalogs loaded yet."
+        )
+
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(rows))
+        for r, block in enumerate(rows):
+            vals = [
+                block.get("registry_hint", ""),
+                block.get("display_name", ""),
+                block.get("source_mod", ""),
+                block.get("confidence", ""),
+                block.get("evidence", ""),
+                str(len(block.get("texture_paths", []) or [])),
+            ]
+            for c, value in enumerate(vals):
+                self.table.setItem(r, c, QTableWidgetItem(str(value)))
+        self.table.setSortingEnabled(True)
+
+    def _save_workspace(self):
+        if not self.sources:
+            QMessageBox.information(self, "Nothing to save", "Add at least one catalog before saving a workspace.")
+            return
+        p, _ = QFileDialog.getSaveFileName(self, "Save catalog workspace", "wg-catalog-workspace.json", "JSON (*.json)")
+        if not p:
+            return
+        payload = {
+            "schema": 1,
+            "kind": "catalog_workspace",
+            "sources": [
+                {
+                    "enabled": bool(source["enabled"]),
+                    "label": source["label"],
+                    "catalog": source["catalog"],
+                }
+                for source in self.sources
+            ],
+        }
+        Path(p).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 class MainWindow(QMainWindow):

@@ -76,6 +76,21 @@ Also verify the **Mod / JAR Analyzer**, **Modpack Analyzer**, and **Catalog Work
 
 The source verifier enforces the explicit Qt form/scroll sizing policy and interactive analyzer-header policy so these behaviours stay deterministic across platform styles.
 
+
+## Legacy mod analysis and multi-catalog workspace validation
+
+For a packaged functional test, analyse at least one Forge 1.7.10 mod that includes multiple localisation files and legacy/custom models. Confirm that:
+
+- `en_US` display names win even when another locale appears earlier in the JAR;
+- when legacy static `Block` fields can be recovered, arbitrary `textures/blocks` assets are not promoted into separate registered-block candidates;
+- legacy OBJ/DAE/HMF/TCN model assets are counted and exact-name associations appear in the `Models` column;
+- confidence/evidence varies according to blockstate, class-file, model, texture, and localisation evidence instead of every legacy entry reporting `low`;
+- detected TileEntity subclasses are reported as analysis evidence without claiming that tile-entity rendering/model binding is fully implemented;
+- sorting the JAR Analyzer table does not make texture previews point at a different underlying candidate;
+- manually resized analyzer columns remain user-selected until an actual window-width change requires contraction, and expanding the window restores the remembered preferred widths.
+
+For **Catalog Workspace**, load two or more individual mod catalog JSONs and at least one modpack analysis. Confirm that loading adds sources rather than replacing existing ones, each source has an independent checkbox, disabling a source removes its rows from the active count/view, `Remove selected` and `Clear all` behave as labelled, duplicate imports do not duplicate every row, and `Save workspace…` produces a JSON that can be loaded again with its enabled/disabled states preserved.
+
 ## Forge 1.7.10 registry and conversion preflight validation
 
 Before trusting a modern → Forge 1.7.10 conversion, verify the target/template world was opened and saved in the exact destination Forge 1.7.10 modpack. Forge 1.7.10 persists blocks and items together in `FML/ItemData`; the first character of each key distinguishes block entries (`U+0001`) from item entries (`U+0002`). The backporter must strip that discriminator, retain only block entries for block-ID resolution, and reject an unusable registry snapshot before creating an output world.

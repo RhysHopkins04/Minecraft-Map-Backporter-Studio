@@ -18,6 +18,8 @@ class BlockAsset:
     blockstate_path: str = ""
     source_mod: str = ""
     source_file: str = ""
+    candidate_kind: str = "block asset candidate"
+    localization_locale: str = ""
 
 @dataclass
 class ModCatalog:
@@ -30,6 +32,7 @@ class ModCatalog:
     blocks: list[BlockAsset] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     raw_metadata: dict[str, Any] = field(default_factory=dict)
+    analysis_stats: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +46,7 @@ class ModCatalog:
             "mod_version": self.mod_version,
             "notes": self.notes,
             "raw_metadata": self.raw_metadata,
+            "analysis_stats": self.analysis_stats,
             "blocks": [asdict(b) for b in self.blocks],
         }
 

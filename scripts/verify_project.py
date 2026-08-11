@@ -389,6 +389,20 @@ for token in [
         error(f"Forge 1.7.10 registry regression test missing: {token}")
 
 for token in [
+    "def _minimal_block_holder_class() -> bytes:",
+    'z.writestr("assets/demo/lang/zh_CN.lang"',
+    'z.writestr("assets/demo/lang/en_US.lang"',
+    'z.writestr("assets/demo/models/blocks/demo_brick.obj"',
+    'z.writestr("demo/ModBlocks.class"',
+    'assert len(cat.blocks) == 1',
+    'assert block.display_name == "Demo Brick"',
+    'assert block.localization_locale == "en_us"',
+    'assert block.model_paths == ["assets/demo/models/blocks/demo_brick.obj"]',
+]:
+    if token not in test_smoke:
+        error(f"Legacy analyzer regression test missing: {token}")
+
+for token in [
     '"Backport finished with failures"',
     'if failed:',
     'Conversion finished with no chunk failures.',
@@ -398,6 +412,7 @@ for token in [
 
 for token in [
     "class _AdaptiveHeaderTable(QTableWidget)",
+    'previous_width = getattr(self, "_wg_last_outer_width", None)',
     "def _configure_resizable_columns",
     "_HEADER_TEXT_ALLOWANCE = 42",
     "_HEADER_COMFORT_MARGIN = 14",
@@ -406,8 +421,10 @@ for token in [
     "QFontMetrics(header.font())",
     "metrics.horizontalAdvance(label) + _HEADER_TEXT_ALLOWANCE",
     "preferreds = tuple(width + _HEADER_COMFORT_MARGIN for width in minimums)",
-    "available = max(0, table.viewport().width() - 2)",
-    "fraction = (available - minimum_total) / max(1, preferred_total - minimum_total)",
+    "table._wg_header_desireds = list(preferreds)",
+    "desireds = tuple(max(minimum, desired)",
+    "keep_fraction = (available - minimum_total) / shrinkable",
+    "table._wg_header_desireds[index] = new_size",
     "header.sectionResized.connect(keep_readable)",
     "table._wg_fit_header_columns = fit_columns_to_view",
     "table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)",
@@ -422,6 +439,60 @@ for token in [
 ]:
     if token not in main_window:
         error(f"Analyzer table/header layout invariant missing: {token}")
+
+# Legacy JAR analysis must prefer English localization, use class-file Block
+# declarations as stronger 1.7.10 evidence, and understand packaged legacy
+# model formats without executing the mod.
+jar_analyzer_path = root / "src/wgmap_backporter_studio/core/jar_analyzer.py"
+jar_analyzer = jar_analyzer_path.read_text(encoding="utf-8") if jar_analyzer_path.exists() else ""
+for token in [
+    'if loc == "en_us":',
+    'return (0, loc)',
+    'def _parse_class_structure(data: bytes):',
+    'def _legacy_class_evidence(',
+    '_BLOCK_BASE = "net/minecraft/block/Block"',
+    '_TILE_ENTITY_BASE = "net/minecraft/tileentity/TileEntity"',
+    '_ANY_MODEL_RE = re.compile',
+    'legacy static Block field',
+    'candidate_kind = "registered block candidate"',
+    '"packaged_model_assets": len(all_model_assets)',
+    '"legacy_static_block_fields": len(legacy_fields)',
+    '"legacy_tile_entity_subclasses": tile_entity_class_count',
+    'Display names prefer en_US',
+]:
+    if token not in jar_analyzer:
+        error(f"Legacy JAR analyzer invariant missing: {token}")
+
+catalog_model_path = root / "src/wgmap_backporter_studio/core/catalog.py"
+catalog_model = catalog_model_path.read_text(encoding="utf-8") if catalog_model_path.exists() else ""
+for token in [
+    'candidate_kind: str = "block asset candidate"',
+    'localization_locale: str = ""',
+    'analysis_stats: dict[str, Any] = field(default_factory=dict)',
+    '"analysis_stats": self.analysis_stats',
+]:
+    if token not in catalog_model:
+        error(f"Catalog evidence model invariant missing: {token}")
+
+# Catalog Workspace is additive: individual catalogs and modpack analyses can
+# coexist, be toggled independently, and be saved as a reusable workspace.
+for token in [
+    'self.sources: list[dict] = []',
+    'QPushButton("Add catalog(s)…")',
+    'QPushButton("Remove selected")',
+    'QPushButton("Clear all")',
+    'QPushButton("Save workspace…")',
+    'self.source_list = QListWidget()',
+    'item.setCheckState(Qt.Checked if enabled else Qt.Unchecked)',
+    'elif kind == "modpack_block_analysis":',
+    'elif kind == "catalog_workspace":',
+    'def _active_rows(self) -> list[dict]:',
+    '"kind": "catalog_workspace"',
+    'item.setData(Qt.UserRole, r)',
+    'source_index = anchor.data(Qt.UserRole)',
+]:
+    if token not in main_window:
+        error(f"Multi-catalog/analyzer interaction invariant missing: {token}")
 
 for forbidden in [
     "setSectionResizeMode(0, QHeaderView.Stretch)",

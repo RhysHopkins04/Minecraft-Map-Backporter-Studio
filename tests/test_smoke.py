@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import struct
 import sys
 import tempfile
 import zipfile
@@ -15,13 +16,52 @@ from wgmap_backporter_studio.core import legacy1710_engine
 from wgmap_backporter_studio.app import packaged_self_test
 
 
+def _minimal_block_holder_class() -> bytes:
+    """Build a tiny valid class with one public static Minecraft Block field."""
+    cp = []
+
+    def utf8(value: str):
+        raw = value.encode("utf-8")
+        cp.append(b"\x01" + struct.pack(">H", len(raw)) + raw)
+        return len(cp)
+
+    def class_ref(name_index: int):
+        cp.append(b"\x07" + struct.pack(">H", name_index))
+        return len(cp)
+
+    this_name = utf8("demo/ModBlocks")
+    this_class = class_ref(this_name)
+    super_name = utf8("java/lang/Object")
+    super_class = class_ref(super_name)
+    field_name = utf8("demo_brick")
+    field_desc = utf8("Lnet/minecraft/block/Block;")
+
+    out = bytearray()
+    out += struct.pack(">IHHH", 0xCAFEBABE, 0, 52, len(cp) + 1)
+    for entry in cp:
+        out += entry
+    out += struct.pack(">HHH", 0x0021, this_class, super_class)  # public + super
+    out += struct.pack(">H", 0)  # interfaces
+    out += struct.pack(">H", 1)  # fields
+    out += struct.pack(">HHHH", 0x0009, field_name, field_desc, 0)  # public static
+    out += struct.pack(">H", 0)  # methods
+    out += struct.pack(">H", 0)  # class attributes
+    return bytes(out)
+
+
 def make_fake_jar(path: Path):
     mcmod = [{"modid":"demo","name":"Demo Blocks","version":"1.0","mcversion":"1.7.10"}]
+    png = bytes.fromhex("89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000000D49444154789C63606060F80F0001040100F805FF640000000049454E44AE426082")
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("mcmod.info", json.dumps(mcmod))
+        # Put Chinese first deliberately: analyzer language priority must still
+        # choose en_US rather than ZIP member order.
+        z.writestr("assets/demo/lang/zh_CN.lang", "tile.demo_brick.name=演示砖\n")
         z.writestr("assets/demo/lang/en_US.lang", "tile.demo_brick.name=Demo Brick\n")
-        # tiny valid 1x1 PNG
-        z.writestr("assets/demo/textures/blocks/demo_brick.png", bytes.fromhex("89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000000D49444154789C63606060F80F0001040100F805FF640000000049454E44AE426082"))
+        z.writestr("assets/demo/textures/blocks/demo_brick.png", png)
+        z.writestr("assets/demo/textures/blocks/particle/noise.png", png)
+        z.writestr("assets/demo/models/blocks/demo_brick.obj", "o DemoBrick\n")
+        z.writestr("demo/ModBlocks.class", _minimal_block_holder_class())
 
 
 def test_forge1710_itemdata_registry():
@@ -67,7 +107,16 @@ def main():
         td = Path(td); jar = td / "demo.jar"; make_fake_jar(jar)
         cat = analyze_jar(jar)
         assert cat.mod_ids == ["demo"]
-        assert any(b.registry_hint == "demo:demo_brick" for b in cat.blocks)
+        assert len(cat.blocks) == 1, "legacy class evidence should exclude unrelated textures/blocks assets"
+        block = cat.blocks[0]
+        assert block.registry_hint == "demo:demo_brick"
+        assert block.display_name == "Demo Brick"
+        assert block.localization_locale == "en_us"
+        assert block.confidence == "high"
+        assert block.candidate_kind == "registered block candidate"
+        assert block.model_paths == ["assets/demo/models/blocks/demo_brick.obj"]
+        assert cat.analysis_stats["legacy_static_block_fields"] == 1
+        assert cat.analysis_stats["packaged_model_assets"] == 1
         pack = td / "pack"; (pack / "mods").mkdir(parents=True); (pack / "mods" / "demo.jar").write_bytes(jar.read_bytes())
         rep = analyze_modpack(pack)
         assert rep.local_jars == 1 and rep.mods[0].block_candidates >= 1

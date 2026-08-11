@@ -38,12 +38,14 @@ The application can inspect mod JARs for block-related information such as:
 - mod metadata,
 - asset namespaces,
 - blockstate/model JSON,
+- legacy model assets such as OBJ/DAE/HMF/TCN where packaged,
 - block textures,
-- language/display-name hints,
-- likely registry-name hints,
+- English-first language/display-name hints,
+- class-file evidence for legacy static `Block` declarations,
+- likely registry-name hints with confidence/evidence labels,
 - texture previews.
 
-Asset-derived results are treated as evidence rather than proof. Legacy mods and custom renderers can register blocks in ways that cannot be reconstructed perfectly from packaged resources alone.
+For legacy Forge mods, class-file `Block` declarations are used as stronger evidence than blindly treating every file under `textures/blocks` as a registered block. Asset-derived registry names remain candidates rather than absolute proof, and custom registration/rendering can still require manual review.
 
 ### Modpack Analyzer
 
@@ -51,7 +53,7 @@ Local instances, ZIPs, and CurseForge-style exports can be scanned to build a co
 
 ### Catalog Workspace
 
-Generated catalogs provide the basis for future reusable mapping profiles and visual source→target suggestions.
+The workspace can combine multiple individual mod catalogs and modpack analyses at the same time. Each loaded catalog can be enabled/disabled independently, removed, searched as part of the active target-block pool, and saved in a reusable workspace JSON. This active catalog set is the basis for future reusable mapping profiles and visual source→target suggestions.
 
 ## Target versions
 
