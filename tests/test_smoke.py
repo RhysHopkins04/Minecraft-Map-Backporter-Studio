@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from wgmap_backporter_studio.core.jar_analyzer import analyze_jar
 from wgmap_backporter_studio.core.modpack_analyzer import analyze_modpack
 from wgmap_backporter_studio.core.version_targets import TARGET_BY_VERSION
+from wgmap_backporter_studio.core.mapping_profiles import profile_from_catalog_snapshot
 from wgmap_backporter_studio.core import legacy1710_engine
 from wgmap_backporter_studio.app import packaged_self_test
 
@@ -98,10 +99,57 @@ def test_forge1710_itemdata_registry():
         raise AssertionError("item-only Forge ItemData must not be accepted as a block registry")
 
 
+
+def test_catalog_bound_mapping_profile():
+    reg = legacy1710_engine.TargetRegistry({
+        "minecraft:air": 0,
+        "minecraft:stone": 1,
+        "minecraft:grass": 2,
+        "minecraft:dirt": 3,
+        "minecraft:cobblestone": 4,
+        "minecraft:planks": 5,
+        "minecraft:bedrock": 7,
+        "minecraft:water": 9,
+        "minecraft:stained_hardened_clay": 159,
+        "hbm:concrete_colored": 901,
+    })
+
+    enabled = profile_from_catalog_snapshot({
+        "enabled_catalogs": ["HBM test catalog"],
+        "enabled_mod_ids": ["hbm"],
+        "registry_hints": ["hbm:concrete_colored"],
+        "candidate_count": 1,
+    }, True)
+    assert enabled.catalog_bound
+    assert enabled.allows_namespace("hbm")
+    mapped = legacy1710_engine.map_modern(
+        "minecraft:white_concrete", {}, reg, True, enabled
+    )
+    assert mapped.target == "hbm:concrete_colored"
+
+    disabled = profile_from_catalog_snapshot({
+        "enabled_catalogs": [],
+        "enabled_mod_ids": [],
+        "registry_hints": [],
+        "candidate_count": 0,
+    }, True)
+    assert disabled.catalog_bound
+    assert not disabled.allows_namespace("hbm")
+    fallback = legacy1710_engine.map_modern(
+        "minecraft:white_concrete", {}, reg, True, disabled
+    )
+    assert fallback.target == "minecraft:stained_hardened_clay"
+    assert "Catalog Workspace" in fallback.note
+
+
 def main():
     assert TARGET_BY_VERSION["1.7.10"].backend == "legacy1710"
+    assert TARGET_BY_VERSION["1.7.10"].recommended_y_offset == 0
+    assert TARGET_BY_VERSION["1.7.10"].recommended_strip_below_y == 0
     assert hasattr(legacy1710_engine, "run_conversion")
+    assert hasattr(legacy1710_engine, "run_conversion_preflight")
     test_forge1710_itemdata_registry()
+    test_catalog_bound_mapping_profile()
     assert packaged_self_test() == 0
     with tempfile.TemporaryDirectory() as td:
         td = Path(td); jar = td / "demo.jar"; make_fake_jar(jar)

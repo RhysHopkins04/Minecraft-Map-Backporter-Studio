@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from .. import APP_NAME, __version__
 from ..core.catalog import load_catalog
 from ..core.jar_analyzer import analyze_jar, read_texture_bytes
-from ..core.legacy1710_engine import analyze_source, run_conversion
+from ..core.legacy1710_engine import run_conversion, run_conversion_preflight
 from ..core.modpack_analyzer import analyze_modpack
 from ..core.version_targets import TARGETS
 
@@ -186,7 +186,7 @@ class DashboardTab(QWidget):
             ("Map Backporter", "Convert modern Anvil regions into a validated older target format. The 1.7.10 Forge/HBM backend is available now."),
             ("Mod / JAR Analyzer", "Inspect a mod JAR's block textures, blockstate/model assets, metadata and likely registry names without launching Minecraft."),
             ("Modpack Analyzer", "Inspect local modpack instances or ZIP exports and build a reusable target-block catalog from the JARs actually present."),
-            ("Catalog Workspace", "Search exported block catalogs while preparing or reviewing mapping profiles for future conversion backends."),
+            ("Catalog Workspace", "Combine target catalogs and control which mod namespaces are eligible for reviewed safe Backporter mapping rules."),
         ]
         for i, (name, desc) in enumerate(items):
             card = QFrame(); card.setObjectName("card"); l = QVBoxLayout(card)
@@ -246,23 +246,22 @@ class AsyncTab(QWidget):
 
 
 class BackportTab(AsyncTab):
-    def __init__(self):
+    def __init__(self, catalog_provider=None):
         super().__init__()
+        self._catalog_provider = catalog_provider
+        self._preflight_result = None
+        self._preflight_token = None
+
         root = QVBoxLayout(self); root.addLayout(_title(
             "Map Backporter",
-            "Select the modern map, an older target/template world created with the exact destination modpack, and an empty output folder."
+            "Preflight the modern source against the exact target/template world and active Catalog Workspace before creating an output world."
         ))
-        # Keep the configuration controls at their usable size even when the
-        # outer window is vertically constrained. Short windows scroll this
-        # page instead of asking Qt to crush form rows into one another.
+
         scroll = QScrollArea(self)
         scroll.setObjectName("backportScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        # QScrollArea owns a viewport widget that otherwise picks up a native
-        # macOS panel background. Keep the viewport/body on the application
-        # canvas so group-box title margins and button rows do not show grey bars.
         scroll.viewport().setObjectName("backportScrollViewport")
         scroll_body = QWidget(scroll)
         scroll_body.setObjectName("backportScrollBody")
@@ -270,10 +269,6 @@ class BackportTab(AsyncTab):
         body.setContentsMargins(0, 0, 0, 0)
 
         form_group = QGroupBox("Conversion job")
-        # QFormLayout defaults are platform-style dependent. On macOS the native
-        # defaults keep fields close to their size hints and center the form,
-        # which can make this page appear vertically/horizontally collapsed.
-        # Pin the layout policy so the same form geometry is used on every OS.
         form_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         form_group.setMinimumHeight(195)
         form = QFormLayout(form_group)
@@ -283,112 +278,440 @@ class BackportTab(AsyncTab):
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(8)
-        self.source = QLineEdit(); self.source.setPlaceholderText("Modern world folder, region folder, region ZIP, or .mca")
-        src_wrap = QWidget(self); src_l = QHBoxLayout(src_wrap); src_l.setContentsMargins(0, 0, 0, 0); src_l.addWidget(self.source, 1)
-        src_file = QPushButton("File / ZIP…"); src_folder = QPushButton("Folder…")
+
+        self.source = QLineEdit()
+        self.source.setPlaceholderText("Modern world folder, region folder, region ZIP, or .mca")
+        src_wrap = QWidget(self)
+        src_l = QHBoxLayout(src_wrap)
+        src_l.setContentsMargins(0, 0, 0, 0)
+        src_l.addWidget(self.source, 1)
+        src_file = QPushButton("File / ZIP…")
+        src_folder = QPushButton("Folder…")
+
         def choose_source_file():
-            p, _ = QFileDialog.getOpenFileName(self, "Select modern map/region file", self.source.text() or str(Path.home()), "Minecraft map data (*.zip *.mca);;All files (*)")
-            if p: self.source.setText(p)
+            p, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select modern map/region file",
+                self.source.text() or str(Path.home()),
+                "Minecraft map data (*.zip *.mca);;All files (*)",
+            )
+            if p:
+                self.source.setText(p)
+
         def choose_source_folder():
-            p = QFileDialog.getExistingDirectory(self, "Select modern world/region folder", self.source.text() or str(Path.home()))
-            if p: self.source.setText(p)
-        src_file.clicked.connect(choose_source_file); src_folder.clicked.connect(choose_source_folder); src_l.addWidget(src_file); src_l.addWidget(src_folder)
+            p = QFileDialog.getExistingDirectory(
+                self,
+                "Select modern world/region folder",
+                self.source.text() or str(Path.home()),
+            )
+            if p:
+                self.source.setText(p)
+
+        src_file.clicked.connect(choose_source_file)
+        src_folder.clicked.connect(choose_source_folder)
+        src_l.addWidget(src_file)
+        src_l.addWidget(src_folder)
         form.addRow("Source map", src_wrap)
+
         self.version = QComboBox()
         self.version.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.version.setMinimumWidth(220)
         self.version.setMaximumWidth(320)
-        for t in TARGETS: self.version.addItem(f"{t.version} — {t.status}", t)
-        self.version.currentIndexChanged.connect(self._target_changed); form.addRow("Target version", self.version)
+        for t in TARGETS:
+            self.version.addItem(f"{t.version} — {t.status}", t)
+        form.addRow("Target version", self.version)
+
         self.target_status = _muted("")
         self.target_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         form.addRow("Backend", self.target_status)
-        self.template = QLineEdit(); self.template.setPlaceholderText("Saved target world opened once with the destination modpack")
+
+        self.template = QLineEdit()
+        self.template.setPlaceholderText("Saved target world opened once with the destination modpack")
         form.addRow("Template world", _path_row(self, "Select target/template world", "dir", self.template))
-        self.output = QLineEdit(); self.output.setPlaceholderText("New or empty output world folder")
+
+        self.output = QLineEdit()
+        self.output.setPlaceholderText("New or empty output world folder")
         form.addRow("Output world", _path_row(self, "Select empty output folder", "dir", self.output))
         body.addWidget(form_group)
 
         opts = QGroupBox("Surface / compatibility options")
         opts.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
-        opts.setMinimumHeight(150)
+        opts.setMinimumHeight(205)
         og = QGridLayout(opts)
         og.setColumnStretch(1, 1)
         og.setHorizontalSpacing(12)
         og.setVerticalSpacing(8)
-        self.hbm = QCheckBox("Use safe mod architectural block replacements"); self.hbm.setChecked(True)
-        self.hbm.setToolTip("Use only configured architectural/decorative mod substitutes; machines, ores and valuable resource blocks are excluded. The current 1.7.10 backend includes HBM architectural mappings.")
-        self.yoff = QSpinBox(); self.yoff.setRange(-192, 192); self.yoff.setSingleStep(16); self.yoff.setValue(0); self.yoff.setMaximumWidth(180)
-        self.strip = QSpinBox(); self.strip.setRange(0, 255); self.strip.setValue(0); self.strip.setMaximumWidth(180)
-        og.addWidget(self.hbm, 0, 0, 1, 2); og.addWidget(QLabel("Vertical offset"), 1, 0); og.addWidget(self.yoff, 1, 1)
-        og.addWidget(QLabel("Strip/fill below target Y"), 2, 0); og.addWidget(self.strip, 2, 1)
-        og.addWidget(_muted("For 1.7.10, source blocks below Y=0 or above Y=255 cannot be represented. Offset 0 preserves normal RTG/sea-level alignment."), 3, 0, 1, 2)
+
+        self.hbm = QCheckBox("Use safe mod architectural block replacements")
+        self.hbm.setChecked(True)
+        self.hbm.setToolTip(
+            "Use only reviewed architectural/decorative mapping rules from mod namespaces enabled in Catalog Workspace. "
+            "Catalogs enable eligible target mods; they do not invent unreviewed block-to-block mappings."
+        )
+        self.catalog_status = _muted("")
+        self.yoff = QSpinBox()
+        self.yoff.setRange(-192, 192)
+        self.yoff.setSingleStep(16)
+        self.yoff.setValue(0)
+        self.yoff.setMaximumWidth(180)
+        self.strip = QSpinBox()
+        self.strip.setRange(0, 255)
+        self.strip.setValue(0)
+        self.strip.setMaximumWidth(180)
+        self.recommended_btn = QPushButton("Use recommended")
+        self.recommended_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.recommended_status = _muted("")
+
+        og.addWidget(self.hbm, 0, 0, 1, 2)
+        og.addWidget(self.catalog_status, 1, 0, 1, 2)
+        og.addWidget(QLabel("Vertical offset"), 2, 0)
+        og.addWidget(self.yoff, 2, 1)
+        og.addWidget(QLabel("Strip/fill below target Y"), 3, 0)
+        og.addWidget(self.strip, 3, 1)
+        recommended_row = QHBoxLayout()
+        recommended_row.addWidget(self.recommended_btn)
+        recommended_row.addWidget(self.recommended_status, 1)
+        og.addLayout(recommended_row, 4, 0, 1, 2)
+        og.addWidget(
+            _muted(
+                "For 1.7.10, source blocks below Y=0 or above Y=255 cannot be represented. "
+                "The recommended 0 / 0 profile preserves normal RTG and sea-level alignment."
+            ),
+            5, 0, 1, 2,
+        )
         body.addWidget(opts)
 
-        buttons = QHBoxLayout(); self.scan_btn = QPushButton("Scan source"); self.convert_btn = QPushButton("Convert map"); self.convert_btn.setObjectName("primary")
-        buttons.addWidget(self.scan_btn); buttons.addStretch(); buttons.addWidget(self.convert_btn); body.addLayout(buttons)
-        self.progress = QProgressBar(); self.progress.setRange(0, 1); self.progress.setValue(0); body.addWidget(self.progress)
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(150); body.addWidget(self.log, 1)
-        scroll_body.setMinimumHeight(610)
+        status_group = QGroupBox("Conversion preflight")
+        status_layout = QVBoxLayout(status_group)
+        self.preflight_status = _muted(
+            "Required before Convert map. Preflight is read-only and validates the source, target registry, active catalogs and mapping settings."
+        )
+        status_layout.addWidget(self.preflight_status)
+        body.addWidget(status_group)
+
+        buttons = QHBoxLayout()
+        self.scan_btn = QPushButton("Preflight conversion")
+        self.convert_btn = QPushButton("Convert map")
+        self.convert_btn.setObjectName("primary")
+        buttons.addWidget(self.scan_btn)
+        buttons.addStretch()
+        buttons.addWidget(self.convert_btn)
+        body.addLayout(buttons)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        body.addWidget(self.progress)
+
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMinimumHeight(150)
+        body.addWidget(self.log, 1)
+
+        scroll_body.setMinimumHeight(700)
         scroll.setWidget(scroll_body)
         root.addWidget(scroll, 1)
-        self.scan_btn.clicked.connect(self.scan_source); self.convert_btn.clicked.connect(self.convert); self._target_changed()
 
-    def _target_changed(self):
+        self.scan_btn.clicked.connect(self.scan_source)
+        self.convert_btn.clicked.connect(self.convert)
+        self.recommended_btn.clicked.connect(self._apply_recommended)
+        self.version.currentIndexChanged.connect(self._target_changed)
+        self.source.textChanged.connect(self._invalidate_preflight)
+        self.template.textChanged.connect(self._invalidate_preflight)
+        self.yoff.valueChanged.connect(self._invalidate_preflight)
+        self.strip.valueChanged.connect(self._invalidate_preflight)
+        self.hbm.stateChanged.connect(self._invalidate_preflight)
+
+        self._target_changed()
+        self._refresh_catalog_status()
+        self._update_action_state()
+
+    def _catalog_snapshot(self) -> dict:
+        if self._catalog_provider is None:
+            return {
+                "enabled_catalogs": [],
+                "enabled_mod_ids": [],
+                "registry_hints": [],
+                "candidate_count": 0,
+            }
+        try:
+            snapshot = self._catalog_provider() or {}
+        except Exception:
+            snapshot = {}
+        return {
+            "enabled_catalogs": list(snapshot.get("enabled_catalogs") or []),
+            "enabled_mod_ids": sorted({str(x).lower() for x in (snapshot.get("enabled_mod_ids") or []) if str(x).strip()}),
+            "registry_hints": sorted({str(x).lower() for x in (snapshot.get("registry_hints") or []) if str(x).strip()}),
+            "candidate_count": int(snapshot.get("candidate_count") or 0),
+        }
+
+    def _current_input_token(self) -> str:
+        payload = {
+            "source": self.source.text().strip(),
+            "template": self.template.text().strip(),
+            "target": getattr(self.version.currentData(), "version", ""),
+            "allow_safe_mod_replacements": bool(self.hbm.isChecked()),
+            "vertical_offset": int(self.yoff.value()),
+            "strip_below_y": int(self.strip.value()),
+            "catalog_snapshot": self._catalog_snapshot(),
+        }
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+    def _preflight_valid(self) -> bool:
+        return bool(
+            isinstance(self._preflight_result, dict)
+            and self._preflight_result.get("ready")
+            and self._preflight_token == self._current_input_token()
+        )
+
+    def _invalidate_preflight(self, *_args):
+        self._preflight_result = None
+        self._preflight_token = None
+        if hasattr(self, "preflight_status"):
+            self.preflight_status.setText(
+                "Preflight required — source, template, mapping settings or enabled catalogs changed."
+            )
+        self._update_action_state()
+
+    def catalog_workspace_changed(self):
+        self._refresh_catalog_status()
+        self._invalidate_preflight()
+
+    def _refresh_catalog_status(self):
+        snapshot = self._catalog_snapshot()
+        labels = snapshot["enabled_catalogs"]
+        mods = snapshot["enabled_mod_ids"]
+        if not labels:
+            text = "Catalog Workspace: 0 enabled catalogs • safe mod rules will fall back to vanilla targets."
+        else:
+            text = (
+                f"Catalog Workspace: {len(labels):,} enabled catalog(s) • "
+                f"{snapshot['candidate_count']:,} active candidates • namespaces: {', '.join(mods) or 'none'}"
+            )
+        if hasattr(self, "catalog_status"):
+            self.catalog_status.setText(text)
+
+    def _target_changed(self, *_args):
         t = self.version.currentData()
         self.target_status.setText(f"{t.status}: {t.notes}")
-        self.convert_btn.setEnabled(t.backend is not None and self._thread is None)
         self.hbm.setEnabled(t.version == "1.7.10")
+        if t.recommended_y_offset is not None and t.recommended_strip_below_y is not None:
+            self.recommended_btn.setEnabled(True)
+            self.recommended_status.setText(
+                f"{t.version} recommended surface profile: vertical offset {t.recommended_y_offset}, "
+                f"strip/fill below Y {t.recommended_strip_below_y}."
+            )
+        else:
+            self.recommended_btn.setEnabled(False)
+            self.recommended_status.setText("No automatic recommendation is defined for this planned target yet.")
+        self._invalidate_preflight()
+
+    def _apply_recommended(self):
+        t = self.version.currentData()
+        if t.recommended_y_offset is None or t.recommended_strip_below_y is None:
+            return
+        self.yoff.setValue(int(t.recommended_y_offset))
+        self.strip.setValue(int(t.recommended_strip_below_y))
+        self._invalidate_preflight()
+
+    def _update_action_state(self):
+        busy = self._thread is not None
+        backend_ready = self.version.currentData().backend is not None
+        self.scan_btn.setEnabled((not busy) and backend_ready)
+        self.convert_btn.setEnabled((not busy) and backend_ready and self._preflight_valid())
 
     def _set_busy(self, busy: bool):
-        self.scan_btn.setEnabled(not busy); self.convert_btn.setEnabled((not busy) and self.version.currentData().backend is not None)
+        self.scan_btn.setEnabled(not busy)
+        self.convert_btn.setEnabled((not busy) and self.version.currentData().backend is not None and self._preflight_valid())
         self.progress.setRange(0, 0 if busy else 1)
-        if not busy: self.progress.setValue(1)
+        if not busy:
+            self.progress.setValue(1)
 
-    def _log(self, s): self.log.appendPlainText(str(s))
+    def _log(self, s):
+        self.log.appendPlainText(str(s))
 
     def scan_source(self):
-        if not self.source.text().strip():
-            QMessageBox.warning(self, "Missing source", "Select a modern world, region folder, or ZIP first."); return
-        self.log.clear(); self._set_busy(True)
+        t = self.version.currentData()
+        if t.backend != "legacy1710":
+            QMessageBox.information(self, "Backend not implemented", f"{t.version} is scaffolded but deliberately not enabled yet.")
+            return
+
+        source = self.source.text().strip()
+        template = self.template.text().strip()
+        if not source or not template:
+            QMessageBox.warning(
+                self,
+                "Missing preflight paths",
+                "Select both the modern source map and the target/template world before running conversion preflight.",
+            )
+            return
+        if self.yoff.value() % 16:
+            QMessageBox.warning(self, "Invalid offset", "The 1.7.10 vertical offset must be a multiple of 16.")
+            return
+
+        request_token = self._current_input_token()
+        snapshot = self._catalog_snapshot()
+        allow_safe = self.hbm.isChecked()
+        yoff = self.yoff.value()
+        strip = self.strip.value()
+
+        self.log.clear()
+        self._preflight_result = None
+        self._preflight_token = None
+        self.preflight_status.setText("Preflight running… no output world will be created.")
+        self._set_busy(True)
+
         def work(log):
-            fd, p = tempfile.mkstemp(prefix="wg_backporter_scan_", suffix=".json"); os.close(fd)
-            try: return analyze_source(self.source.text().strip(), p, log)
-            finally:
-                try: Path(p).unlink()
-                except Exception: pass
+            return run_conversion_preflight(
+                source,
+                template,
+                allow_safe,
+                yoff,
+                strip,
+                catalog_snapshot=snapshot,
+                log=log,
+            )
+
         def done(rep):
+            if request_token != self._current_input_token():
+                self._preflight_result = None
+                self._preflight_token = None
+                self._set_busy(False)
+                self.preflight_status.setText(
+                    "Preflight finished, but the inputs changed while it was running. Run it again before conversion."
+                )
+                QMessageBox.warning(
+                    self,
+                    "Preflight became stale",
+                    "The source, template, settings or Catalog Workspace changed while preflight was running. "
+                    "The result was discarded and no output world was created.",
+                )
+                return
+
+            self._preflight_result = rep
+            self._preflight_token = request_token
+            p = rep.get("preflight") or {}
+            profile = rep.get("mapping_profile") or {}
+            self.preflight_status.setText(
+                f"READY • {rep.get('regions', 0):,} regions • {p.get('chunks', 0):,} chunks • "
+                f"{p.get('unique_palette_states', 0):,} unique in-range palette states • "
+                f"{len(profile.get('enabled_catalogs') or []):,} enabled catalog(s)"
+            )
             self._set_busy(False)
-            self._log("\nScan summary:\n" + json.dumps(rep, indent=2)[:12000])
-            QMessageBox.information(self, "Scan complete", f"Found {rep.get('regions', 0)} region files and {rep.get('chunks', 0)} chunks.")
-        def err(tb): self._set_busy(False); self._log(tb); QMessageBox.critical(self, "Scan failed", tb)
+            summary = {
+                "ready": rep.get("ready"),
+                "regions": rep.get("regions"),
+                "target_registry": rep.get("target_registry"),
+                "mapping_profile": rep.get("mapping_profile"),
+                "preflight": rep.get("preflight"),
+            }
+            self._log("\nPreflight summary:\n" + json.dumps(summary, indent=2, ensure_ascii=False)[:16000])
+            QMessageBox.information(
+                self,
+                "Conversion preflight ready",
+                f"Validated {p.get('chunks', 0):,} source chunks against the target registry and active mapping profile. "
+                "No output world was created. Convert map is now enabled.",
+            )
+
+        def err(tb):
+            self._preflight_result = None
+            self._preflight_token = None
+            self._set_busy(False)
+            self.preflight_status.setText("Preflight FAILED — no output world was created.")
+            self._log(tb)
+            QMessageBox.critical(self, "Conversion preflight failed", tb)
+
         self.launch(work, done, err, self._log)
 
     def convert(self):
         t = self.version.currentData()
         if t.backend != "legacy1710":
-            QMessageBox.information(self, "Backend not implemented", f"{t.version} is scaffolded but deliberately not enabled yet."); return
-        source, template, output = self.source.text().strip(), self.template.text().strip(), self.output.text().strip()
+            QMessageBox.information(self, "Backend not implemented", f"{t.version} is scaffolded but deliberately not enabled yet.")
+            return
+
+        source = self.source.text().strip()
+        template = self.template.text().strip()
+        output = self.output.text().strip()
         if not source or not template or not output:
-            QMessageBox.warning(self, "Missing paths", "Select the source map, target/template world and output folder."); return
+            QMessageBox.warning(self, "Missing paths", "Select the source map, target/template world and output folder.")
+            return
+        if not self._preflight_valid():
+            QMessageBox.warning(
+                self,
+                "Preflight required",
+                "Run Preflight conversion successfully after the latest source, template, settings and Catalog Workspace changes before converting.",
+            )
+            return
         if self.yoff.value() % 16:
-            QMessageBox.warning(self, "Invalid offset", "The 1.7.10 vertical offset must be a multiple of 16."); return
+            QMessageBox.warning(self, "Invalid offset", "The 1.7.10 vertical offset must be a multiple of 16.")
+            return
         if Path(output).exists() and any(Path(output).iterdir()):
-            QMessageBox.warning(self, "Output is not empty", "Choose a new or empty output folder. The converter intentionally refuses to overwrite an existing world."); return
-        self.log.clear(); self._set_busy(True)
+            QMessageBox.warning(
+                self,
+                "Output is not empty",
+                "Choose a new or empty output folder. The converter intentionally refuses to overwrite an existing world.",
+            )
+            return
+
+        snapshot = self._catalog_snapshot()
+        verified = dict(self._preflight_result)
+        allow_safe = self.hbm.isChecked()
+        yoff = self.yoff.value()
+        strip = self.strip.value()
+
+        self.log.clear()
+        self._set_busy(True)
+
         def work(log):
-            return run_conversion(source, template, output, self.hbm.isChecked(), self.yoff.value(), self.strip.value(), log)
+            return run_conversion(
+                source,
+                template,
+                output,
+                allow_safe,
+                yoff,
+                strip,
+                log,
+                catalog_snapshot=snapshot,
+                verified_preflight=verified,
+            )
+
         def done(rep):
-            self._set_busy(False); self._log("\nFinished.\n" + json.dumps({k: rep.get(k) for k in ("regions_converted","chunks_converted","chunks_failed","chunks_cropped_above_255","chunks_cropped_below_0")}, indent=2))
+            self._set_busy(False)
+            self._log(
+                "\nFinished.\n" + json.dumps(
+                    {
+                        k: rep.get(k)
+                        for k in (
+                            "regions_converted",
+                            "chunks_converted",
+                            "chunks_failed",
+                            "chunks_cropped_above_255",
+                            "chunks_cropped_below_0",
+                            "preflight_reused",
+                        )
+                    },
+                    indent=2,
+                )
+            )
             failed = int(rep.get("chunks_failed", 0) or 0)
             if failed:
                 QMessageBox.warning(
-                    self, "Backport finished with failures",
-                    f"Conversion completed, but {failed:,} chunk(s) failed. Do not use the output world yet; review WG_BACKPORT_REPORT.txt first."
+                    self,
+                    "Backport finished with failures",
+                    f"Conversion completed, but {failed:,} chunk(s) failed. Do not use the output world yet; review WG_BACKPORT_REPORT.txt first.",
                 )
             else:
-                QMessageBox.information(self, "Backport complete", "Conversion finished with no chunk failures. Review WG_BACKPORT_REPORT.txt in the output world before opening it in Minecraft.")
-        def err(tb): self._set_busy(False); self._log(tb); QMessageBox.critical(self, "Conversion failed", tb)
+                QMessageBox.information(
+                    self,
+                    "Backport complete",
+                    "Conversion finished with no chunk failures. Review WG_BACKPORT_REPORT.txt in the output world before opening it in Minecraft.",
+                )
+
+        def err(tb):
+            self._set_busy(False)
+            self._log(tb)
+            QMessageBox.critical(self, "Conversion failed", tb)
+
         self.launch(work, done, err, self._log)
 
 
@@ -520,13 +843,15 @@ class ModpackAnalyzerTab(AsyncTab):
 
 
 class CatalogTab(QWidget):
+    workspaceChanged = Signal()
+
     def __init__(self):
         super().__init__()
         self.sources: list[dict] = []
         self._source_serial = 0
         root = QVBoxLayout(self); root.addLayout(_title(
             "Catalog Workspace",
-            "Combine multiple exported mod catalogs or modpack analyses, toggle individual sources on/off, and search the active target-block pool."
+            "Combine multiple catalogs, toggle target mods on/off, and define the active target pool used by Map Backporter's reviewed safe mapping rules."
         ))
 
         toolbar = QHBoxLayout()
@@ -545,7 +870,7 @@ class CatalogTab(QWidget):
         splitter = QSplitter(Qt.Horizontal)
         source_panel = QGroupBox("Loaded catalogs")
         source_layout = QVBoxLayout(source_panel)
-        source_layout.addWidget(_muted("Checked catalogs contribute blocks to the active workspace."))
+        source_layout.addWidget(_muted("Checked catalogs contribute blocks to the active workspace and enable their mod namespaces for reviewed Backporter mapping rules."))
         self.source_list = QListWidget()
         self.source_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         source_layout.addWidget(self.source_list, 1)
@@ -658,6 +983,7 @@ class CatalogTab(QWidget):
             except Exception as exc:
                 errors.append(f"{Path(p).name}: {exc}")
         self._refresh()
+        self.workspaceChanged.emit()
         if errors:
             QMessageBox.warning(self, "Some catalogs could not be loaded", "\n".join(errors))
         elif not added:
@@ -670,6 +996,7 @@ class CatalogTab(QWidget):
                 source["enabled"] = item.checkState() == Qt.Checked
                 break
         self._refresh()
+        self.workspaceChanged.emit()
 
     def _remove_selected(self):
         selected_ids = {item.data(Qt.UserRole) for item in self.source_list.selectedItems()}
@@ -680,6 +1007,7 @@ class CatalogTab(QWidget):
             if self.source_list.item(row).data(Qt.UserRole) in selected_ids:
                 self.source_list.takeItem(row)
         self._refresh()
+        self.workspaceChanged.emit()
 
     def _clear(self):
         if not self.sources:
@@ -687,6 +1015,7 @@ class CatalogTab(QWidget):
         self.sources.clear()
         self.source_list.clear()
         self._refresh()
+        self.workspaceChanged.emit()
 
     def _active_rows(self) -> list[dict]:
         rows: list[dict] = []
@@ -696,6 +1025,33 @@ class CatalogTab(QWidget):
             blocks = source["catalog"].get("blocks", []) or []
             rows.extend(block for block in blocks if isinstance(block, dict))
         return rows
+
+    def active_catalog_snapshot(self) -> dict:
+        """Return a pure-data snapshot suitable for a conversion mapping profile."""
+        labels: list[str] = []
+        mod_ids: set[str] = set()
+        registry_hints: set[str] = set()
+        candidate_count = 0
+        for source in self.sources:
+            if not source["enabled"]:
+                continue
+            labels.append(str(source["label"]))
+            catalog = source["catalog"]
+            for mod_id in catalog.get("mod_ids", []) or []:
+                if str(mod_id).strip():
+                    mod_ids.add(str(mod_id).strip().lower())
+            blocks = [block for block in (catalog.get("blocks", []) or []) if isinstance(block, dict)]
+            candidate_count += len(blocks)
+            for block in blocks:
+                hint = str(block.get("registry_hint") or "").strip().lower()
+                if hint:
+                    registry_hints.add(hint)
+        return {
+            "enabled_catalogs": labels,
+            "enabled_mod_ids": sorted(mod_ids),
+            "registry_hints": sorted(registry_hints),
+            "candidate_count": candidate_count,
+        }
 
     def _refresh(self):
         active_rows = self._active_rows()
@@ -757,5 +1113,14 @@ class MainWindow(QMainWindow):
         super().__init__(); self.setWindowTitle(f"{APP_NAME} {__version__}"); self.resize(1260, 820); self.setMinimumSize(980, 740)
         root = QWidget(); root.setObjectName("rootWindow"); layout = QVBoxLayout(root); layout.setContentsMargins(18, 16, 18, 12)
         header = QHBoxLayout(); brand = QLabel(APP_NAME); brand.setObjectName("sectionTitle"); header.addWidget(brand); header.addStretch(); header.addWidget(_muted(f"v{__version__}")); layout.addLayout(header)
-        tabs = QTabWidget(); tabs.setDocumentMode(True); tabs.addTab(DashboardTab(), "Overview"); tabs.addTab(BackportTab(), "Map Backporter"); tabs.addTab(JarAnalyzerTab(), "Mod / JAR Analyzer"); tabs.addTab(ModpackAnalyzerTab(), "Modpack Analyzer"); tabs.addTab(CatalogTab(), "Catalog Workspace"); layout.addWidget(tabs, 1)
+        tabs = QTabWidget(); tabs.setDocumentMode(True)
+        catalog_tab = CatalogTab()
+        backport_tab = BackportTab(catalog_provider=catalog_tab.active_catalog_snapshot)
+        catalog_tab.workspaceChanged.connect(backport_tab.catalog_workspace_changed)
+        tabs.addTab(DashboardTab(), "Overview")
+        tabs.addTab(backport_tab, "Map Backporter")
+        tabs.addTab(JarAnalyzerTab(), "Mod / JAR Analyzer")
+        tabs.addTab(ModpackAnalyzerTab(), "Modpack Analyzer")
+        tabs.addTab(catalog_tab, "Catalog Workspace")
+        layout.addWidget(tabs, 1)
         self.setCentralWidget(root); self.statusBar().showMessage("Ready — conversions never modify the selected source map or template world in place.")

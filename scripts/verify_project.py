@@ -53,6 +53,7 @@ required = [
     "resources/app_icon.ico",
     "src/wgmap_backporter_studio/app.py",
     "src/wgmap_backporter_studio/core/legacy1710_engine.py",
+    "src/wgmap_backporter_studio/core/mapping_profiles.py",
     "src/wgmap_backporter_studio/ui/main_window.py",
     "tests/test_smoke.py",
 ]
@@ -321,7 +322,7 @@ for token in [
     "scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)",
     'scroll.viewport().setObjectName("backportScrollViewport")',
     'scroll_body.setObjectName("backportScrollBody")',
-    "scroll_body.setMinimumHeight(610)",
+    "scroll_body.setMinimumHeight(700)",
     "form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)",
     "form.setRowWrapPolicy(QFormLayout.DontWrapRows)",
     "form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)",
@@ -333,12 +334,16 @@ for token in [
     "self.version.setMaximumWidth(320)",
     "self.target_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)",
     "opts.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)",
-    "opts.setMinimumHeight(150)",
+    "opts.setMinimumHeight(205)",
     "og.setColumnStretch(1, 1)",
     "self.yoff.setMaximumWidth(180)",
     "self.strip.setMaximumWidth(180)",
     "self.log.setMinimumHeight(150)",
     'QCheckBox("Use safe mod architectural block replacements")',
+    'self.scan_btn = QPushButton("Preflight conversion")',
+    'self.preflight_status = _muted(',
+    'self.recommended_btn = QPushButton("Use recommended")',
+    'self.convert_btn.setEnabled((not busy) and backend_ready and self._preflight_valid())',
     "self.setMinimumSize(980, 740)",
 ]:
     if token not in main_window:
@@ -359,6 +364,10 @@ for token in [
     'TARGET_REGISTRY_SENTINELS',
     'def validate_target_registry(',
     'def preflight_source_mappings(',
+    'def run_conversion_preflight(',
+    'def _conversion_fingerprint(',
+    'Reusing the verified read-only preflight',
+    'Stored preflight no longer matches the current conversion inputs',
     'Running source/target mapping preflight before creating the output world...',
     'report["preflight"]=preflight_source_mappings',
     '"failure_counts":collections.Counter()',
@@ -493,6 +502,59 @@ for token in [
 ]:
     if token not in main_window:
         error(f"Multi-catalog/analyzer interaction invariant missing: {token}")
+
+
+mapping_profile_path = root / "src/wgmap_backporter_studio/core/mapping_profiles.py"
+mapping_profile = mapping_profile_path.read_text(encoding="utf-8") if mapping_profile_path.exists() else ""
+for token in [
+    "class MappingProfile:",
+    "catalog_bound: bool = False",
+    "def allows_namespace(self, namespace: str) -> bool:",
+    'return namespace.strip().lower() in self.enabled_mod_ids',
+    "def profile_from_catalog_snapshot(",
+    '"mode": "enabled_catalogs_safe_rules" if self.catalog_bound else "legacy_safe_rules"',
+    'payload["registry_hints"] = sorted(self.registry_hints)',
+]:
+    if token not in mapping_profile:
+        error(f"Catalog-bound mapping-profile invariant missing: {token}")
+
+for token in [
+    "workspaceChanged = Signal()",
+    "def active_catalog_snapshot(self) -> dict:",
+    '"enabled_catalogs": labels',
+    '"enabled_mod_ids": sorted(mod_ids)',
+    '"registry_hints": sorted(registry_hints)',
+    "BackportTab(catalog_provider=catalog_tab.active_catalog_snapshot)",
+    "catalog_tab.workspaceChanged.connect(backport_tab.catalog_workspace_changed)",
+    "def _current_input_token(self) -> str:",
+    "def _preflight_valid(self) -> bool:",
+    "run_conversion_preflight(",
+    "catalog_snapshot=snapshot",
+    "verified_preflight=verified",
+]:
+    if token not in main_window:
+        error(f"Catalog Workspace → Backporter integration invariant missing: {token}")
+
+version_targets_path = root / "src/wgmap_backporter_studio/core/version_targets.py"
+version_targets = version_targets_path.read_text(encoding="utf-8") if version_targets_path.exists() else ""
+for token in [
+    "recommended_y_offset: int | None = None",
+    "recommended_strip_below_y: int | None = None",
+    "recommended_y_offset=0, recommended_strip_below_y=0",
+]:
+    if token not in version_targets:
+        error(f"Target-aware recommended-setting invariant missing: {token}")
+
+for token in [
+    "def test_catalog_bound_mapping_profile():",
+    'assert enabled.allows_namespace("hbm")',
+    'assert mapped.target == "hbm:concrete_colored"',
+    'assert not disabled.allows_namespace("hbm")',
+    'assert fallback.target == "minecraft:stained_hardened_clay"',
+    'assert hasattr(legacy1710_engine, "run_conversion_preflight")',
+]:
+    if token not in test_smoke:
+        error(f"Catalog-bound mapping-profile regression test missing: {token}")
 
 for forbidden in [
     "setSectionResizeMode(0, QHeaderView.Stretch)",

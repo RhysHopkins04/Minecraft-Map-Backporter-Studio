@@ -16,6 +16,7 @@ import argparse
 import collections
 import dataclasses
 import gzip
+import hashlib
 import json
 import math
 import os
@@ -30,6 +31,8 @@ import traceback
 import zipfile
 import zlib
 from pathlib import Path
+
+from .mapping_profiles import MappingProfile, profile_from_catalog_snapshot
 
 try:
     import numpy as np
@@ -463,7 +466,12 @@ def load_target_registry(world: Path):
     return _target_registry_from_fml(root.get("FML",{}))
 
 
-def validate_target_registry(reg: TargetRegistry, use_hbm=True, log=print):
+def validate_target_registry(
+    reg: TargetRegistry,
+    use_hbm=True,
+    log=print,
+    mapping_profile: MappingProfile | None = None,
+):
     missing=[name for name in TARGET_REGISTRY_SENTINELS if reg.resolve(name) is None]
     if missing:
         raise ConversionError(
@@ -476,8 +484,20 @@ def validate_target_registry(reg: TargetRegistry, use_hbm=True, log=print):
         sample=", ".join("%s=%s"%x for x in bad[:5])
         raise ConversionError("Target block registry contains IDs outside the 1.7.10 block range 0..4095: %s" % sample)
     log("Target registry: %s" % reg.summary())
-    if use_hbm and reg.hbm_count == 0:
+
+    if mapping_profile is not None and mapping_profile.catalog_bound:
+        enabled=", ".join(sorted(mapping_profile.enabled_mod_ids)) or "none"
+        log(
+            "Mapping profile: %d enabled catalog(s); eligible mod namespaces: %s"
+            % (len(mapping_profile.enabled_catalogs), enabled)
+        )
+        if mapping_profile.allow_safe_mod_replacements and not mapping_profile.enabled_mod_ids:
+            log("NOTICE: safe mod replacements are enabled, but no Catalog Workspace sources are enabled; vanilla fallbacks will be used.")
+        if mapping_profile.allows_namespace("hbm") and reg.hbm_count == 0:
+            log("WARNING: HBM is enabled by the active catalogs, but the target registry contains no HBM block entries; vanilla fallbacks will be used.")
+    elif use_hbm and reg.hbm_count == 0:
         log("WARNING: safe mod architectural replacements are enabled, but the target registry contains no HBM block entries; vanilla fallbacks will be used.")
+
     return {
         "source_format":reg.source_format, "block_ids":len(reg.ids), "raw_entries":reg.raw_entries,
         "ignored_item_entries":reg.ignored_items, "hbm_entries":reg.hbm_count,
@@ -528,15 +548,28 @@ def rail_meta(props, powered_kind=False):
             "south_east":6,"south_west":7,"north_west":8,"north_east":9}.get(shape,0)
 
 
-def map_modern(name, props, reg: TargetRegistry, use_hbm=True):
-    """Return closest legacy block mapping. No HBM machines/ores are used."""
+def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: MappingProfile | None = None):
+    """Return the closest legacy block mapping.
+
+    Reviewed mod-specific substitutions remain explicit rules. When a desktop
+    Catalog Workspace profile is supplied, a mod namespace must also be enabled
+    there before any of its safe substitutions can be used.
+    """
     p=name.split(":",1)[-1]
 
     def V(target,meta=0,q="exact",note=""): return Mapping(target,meta&15,q,note)
     def H(logical, fallback, meta=0, fbmeta=0, q="close", note=""):
-        if use_hbm and logical in HBM_SAFE_ARCHITECTURAL and reg.has_hbm(logical):
+        profile_allows = mapping_profile.allows_namespace("hbm") if mapping_profile is not None else bool(use_hbm)
+        if profile_allows and logical in HBM_SAFE_ARCHITECTURAL and reg.has_hbm(logical):
             return V("hbm:"+logical,meta,q,note)
-        return V(fallback,fbmeta,"approximate", note or ("HBM %s unavailable; vanilla fallback"%logical))
+        if mapping_profile is not None and mapping_profile.catalog_bound and not profile_allows:
+            reason = "HBM is not enabled in the active Catalog Workspace; vanilla fallback"
+        elif not use_hbm or (mapping_profile is not None and not mapping_profile.allow_safe_mod_replacements):
+            reason = "Safe mod replacements disabled; vanilla fallback"
+        else:
+            reason = "HBM %s unavailable in target registry; vanilla fallback" % logical
+        fallback_note = ("%s; %s" % (note, reason)) if note else reason
+        return V(fallback,fbmeta,"approximate", fallback_note)
 
     if name in AIR_NAMES: return V("minecraft:air")
     # Invisible/editor-only modern blocks are safer omitted than turned into visible cubes.
@@ -926,15 +959,26 @@ def _palette_signature(name, props):
     return (str(name), tuple(sorted((str(k), str(v)) for k,v in (props or {}).items())))
 
 
-def preflight_source_mappings(regions, reg: TargetRegistry, use_hbm=True, y_offset=0, log=print):
-    """Parse every source chunk and resolve every in-range palette mapping before output exists.
+def preflight_source_mappings(
+    regions,
+    reg: TargetRegistry,
+    use_hbm=True,
+    y_offset=0,
+    log=print,
+    mapping_profile: MappingProfile | None = None,
+):
+    """Resolve every in-range unique source palette mapping before output exists.
 
-    This deliberately validates the source/target contract before cloning the template world.
-    Palette signatures are resolved once, so repeated stone/air palettes across thousands of
-    chunks do not repeat mapping work.
+    The preflight also estimates vertical cropping and records which reviewed mod
+    targets would be used. Palette signatures are resolved once, so repeated
+    stone/air palettes across thousands of chunks do not repeat mapping work.
     """
-    unique=set(); chunks=0; dvs=collections.Counter(); ymin=999; ymax=-999
+    unique=set(); chunks=0; dvs=collections.Counter()
+    source_ymin=999; source_ymax=-999; inrange_ymin=999; inrange_ymax=-999
     unresolved={}; parse_failures=[]; mapped_targets=collections.Counter()
+    mapping_quality=collections.defaultdict(set); mod_targets=collections.Counter()
+    crop_high_chunks=0; crop_low_chunks=0
+
     for ri,rp in enumerate(regions,1):
         if ri == 1 or ri == len(regions) or ri % 5 == 0:
             log("Preflight [%d/%d] %s" % (ri,len(regions),rp.name))
@@ -944,32 +988,45 @@ def preflight_source_mappings(regions, reg: TargetRegistry, use_hbm=True, y_offs
                 try:
                     c=parse_modern_chunk(raw)
                     chunks+=1; dvs[str(c.get("DataVersion"))]+=1
+                    chunk_high=False; chunk_low=False
                     for section in c["sections"]:
                         sy=section.get("Y"); palette=section.get("palette") or []
                         if sy is None or not palette: continue
+                        source_ymin=min(source_ymin,sy); source_ymax=max(source_ymax,sy)
                         target_base=sy*16+y_offset
+                        has_non_air=any(name not in AIR_NAMES for name,_ in palette)
                         if target_base>255 or target_base+15<0:
+                            if has_non_air:
+                                if target_base>255: chunk_high=True
+                                else: chunk_low=True
                             continue
-                        ymin=min(ymin,sy); ymax=max(ymax,sy)
+
+                        inrange_ymin=min(inrange_ymin,sy); inrange_ymax=max(inrange_ymax,sy)
                         for name,props in palette:
                             sig=_palette_signature(name,props)
                             if sig in unique: continue
                             unique.add(sig)
                             try:
-                                mapping=map_modern(name,props,reg,use_hbm)
+                                mapping=map_modern(name,props,reg,use_hbm,mapping_profile)
                                 _,_,resolved=resolve_mapping(mapping,reg)
                                 mapped_targets[resolved]+=1
+                                mapping_quality[mapping.quality].add(str(name))
+                                if ":" in resolved and not resolved.lower().startswith("minecraft:"):
+                                    mod_targets[resolved]+=1
                             except Exception as exc:
                                 unresolved.setdefault(str(exc),[]).append({
                                     "source":str(name), "properties":dict(props or {}),
                                     "region":rp.name, "chunk_index":idx,
                                 })
+                    if chunk_high: crop_high_chunks+=1
+                    if chunk_low: crop_low_chunks+=1
                 except Exception as exc:
                     if len(parse_failures)<20:
                         parse_failures.append({"region":rp.name,"chunk_index":idx,"error":str(exc)})
         except Exception as exc:
             if len(parse_failures)<20:
                 parse_failures.append({"region":rp.name,"error":str(exc)})
+
     if chunks == 0:
         raise ConversionError("Source preflight found no readable chunks")
     if parse_failures:
@@ -987,17 +1044,40 @@ def preflight_source_mappings(regions, reg: TargetRegistry, use_hbm=True, y_offs
             "Source/target mapping preflight found %d unresolved mapping problem(s). "
             "No output world was created. %s" % (len(unresolved),"; ".join(details))
         )
+
     info={
-        "chunks":chunks, "unique_palette_states":len(unique), "data_versions":dict(dvs),
-        "section_y_min":None if ymin==999 else ymin, "section_y_max":None if ymax==-999 else ymax,
+        "chunks":chunks,
+        "unique_palette_states":len(unique),
+        "data_versions":dict(dvs),
+        "source_section_y_min":None if source_ymin==999 else source_ymin,
+        "source_section_y_max":None if source_ymax==-999 else source_ymax,
+        "in_range_section_y_min":None if inrange_ymin==999 else inrange_ymin,
+        "in_range_section_y_max":None if inrange_ymax==-999 else inrange_ymax,
+        # Preserve the old field names for callers/reports that used them.
+        "section_y_min":None if source_ymin==999 else source_ymin,
+        "section_y_max":None if source_ymax==-999 else source_ymax,
+        "potential_chunks_cropped_above_255":crop_high_chunks,
+        "potential_chunks_cropped_below_0":crop_low_chunks,
         "resolved_target_names":len(mapped_targets),
+        "mapping_quality":{k:sorted(v) for k,v in mapping_quality.items()},
+        "safe_mod_target_names":sorted(mod_targets),
+        "safe_mod_target_count":len(mod_targets),
     }
     log(
         "Preflight passed: %d chunks; %d unique in-range palette states; DataVersion(s): %s"
         % (chunks,len(unique),", ".join(sorted(dvs)) or "unknown")
     )
+    if crop_high_chunks or crop_low_chunks:
+        log(
+            "Preflight vertical-range notice: %d chunk(s) may crop above Y=255; %d chunk(s) may crop below Y=0."
+            % (crop_high_chunks,crop_low_chunks)
+        )
+    if mod_targets:
+        log(
+            "Preflight safe-mod usage: %d configured target block name(s) from enabled catalog namespaces."
+            % len(mod_targets)
+        )
     return info
-
 
 # ---------- Legacy NBT writer ----------
 def nbt_name(name):
@@ -1093,7 +1173,7 @@ def choose_biomes(sections):
     return out
 
 
-def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats):
+def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_profile: MappingProfile | None = None):
     c=parse_modern_chunk(raw)
     cx,cz=c["xPos"],c["zPos"]
     if cx is None or cz is None: raise ConversionError("Chunk missing xPos/zPos")
@@ -1123,7 +1203,7 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats):
         inds=unpack_palette_indices(s.get("data"),len(pal),4096,4)
         mids=[]; mmeta=[]
         for name,props in pal:
-            mp=map_modern(name,props,reg,use_hbm)
+            mp=map_modern(name,props,reg,use_hbm,mapping_profile)
             rid,meta,resolved=resolve_mapping(mp,reg)
             mids.append(rid); mmeta.append(meta)
             key=name
@@ -1199,20 +1279,141 @@ def ensure_output(template: Path, output: Path):
     (output/"region").mkdir(parents=True,exist_ok=True)
 
 
-def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_below_y=0, log=print):
+def _stable_hash(payload):
+    raw=json.dumps(payload,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _source_fingerprint(source: Path):
+    source=source.resolve()
+    if not source.exists():
+        raise ConversionError("Source path does not exist: %s" % source)
+    if source.is_file():
+        st=source.stat()
+        payload={"kind":"file","path":str(source),"size":st.st_size,"mtime_ns":st.st_mtime_ns}
+        return _stable_hash(payload)
+
+    region_dir=source/"region" if (source/"region").is_dir() else source
+    files=[]
+    for p in sorted(region_dir.glob("r.*.*.mca")):
+        if not p.is_file(): continue
+        st=p.stat()
+        files.append((p.name,st.st_size,st.st_mtime_ns))
+    if not files:
+        raise ConversionError("Source directory contains no Anvil region files: %s" % source)
+    return _stable_hash({"kind":"region_dir","path":str(region_dir.resolve()),"files":files})
+
+
+def _registry_fingerprint(reg: TargetRegistry):
+    return _stable_hash({
+        "source_format":reg.source_format,
+        "ids":sorted((str(k),int(v)) for k,v in reg.ids.items()),
+        "aliases":sorted((str(k),str(v)) for k,v in reg.aliases.items()),
+    })
+
+
+def _conversion_fingerprint(
+    source: Path,
+    template: Path,
+    reg: TargetRegistry,
+    profile: MappingProfile,
+    y_offset: int,
+    strip_below_y: int,
+):
+    level=(template/"level.dat").resolve()
+    if not level.is_file():
+        raise ConversionError("Target/template world has no level.dat: %s" % template)
+    st=level.stat()
+    payload={
+        "source":_source_fingerprint(source),
+        "template_level_dat":{"path":str(level),"size":st.st_size,"mtime_ns":st.st_mtime_ns},
+        "target_registry":_registry_fingerprint(reg),
+        "mapping_profile":profile.fingerprint_payload(),
+        "vertical_offset":int(y_offset),
+        "strip_below_y":int(strip_below_y),
+    }
+    return _stable_hash(payload)
+
+
+def run_conversion_preflight(
+    source,
+    template,
+    use_hbm=True,
+    y_offset=0,
+    strip_below_y=0,
+    catalog_snapshot=None,
+    log=print,
+):
+    """Perform the exact read-only validation required before conversion.
+
+    No output world is created. The returned fingerprint can be handed to
+    ``run_conversion`` so the desktop app does not need to parse every source
+    chunk twice when nothing has changed between preflight and Convert.
+    """
+    if y_offset%16 != 0:
+        raise ConversionError("Vertical offset must be a multiple of 16 (e.g. -32, -16, 0, 16)")
+    if not (0 <= int(strip_below_y) <= 255):
+        raise ConversionError("Strip/fill below target Y must be between 0 and 255")
+
+    source=Path(source); template=Path(template)
+    profile=profile_from_catalog_snapshot(catalog_snapshot,bool(use_hbm))
+    reg=load_target_registry(template)
+    registry_info=validate_target_registry(reg,use_hbm,log,mapping_profile=profile)
+
+    with tempfile.TemporaryDirectory(prefix="wg1710_preflight_") as td:
+        src_regions=discover_source_regions(source,Path(td))
+        regions=[p for p in sorted(src_regions.glob("r.*.*.mca")) if p.stat().st_size>=8192]
+        if not regions:
+            raise ConversionError("Source contains no non-empty Anvil region files")
+        log("Found %d non-empty region files" % len(regions))
+        log("Running read-only source/target conversion preflight...")
+        preflight=preflight_source_mappings(
+            regions,reg,use_hbm,y_offset,log,mapping_profile=profile
+        )
+
+    fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y)
+    result={
+        "ready":True,
+        "source":str(source),
+        "template":str(template),
+        "regions":len(regions),
+        "settings":{
+            "allow_safe_mod_replacements":bool(use_hbm),
+            "vertical_offset":int(y_offset),
+            "strip_below_y":int(strip_below_y),
+        },
+        "target_registry":registry_info,
+        "mapping_profile":profile.to_dict(),
+        "preflight":preflight,
+        "fingerprint":fingerprint,
+    }
+    log("Conversion preflight READY — no output world was created.")
+    return result
+
+
+def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_below_y=0, log=print, catalog_snapshot=None, verified_preflight=None):
     if np is None: raise ConversionError("NumPy is required. Install it with: python3 -m pip install numpy")
     if y_offset%16 != 0: raise ConversionError("Vertical offset must be a multiple of 16 (e.g. -32, -16, 0, 16)")
     source=Path(source); template=Path(template); output=Path(output)
+    profile=profile_from_catalog_snapshot(catalog_snapshot,bool(use_hbm))
 
     # Fail closed before creating/cloning an output world. Forge 1.7.10 registry
-    # parsing and all source palette mappings must be proven usable first.
+    # parsing and the exact mapping profile must be proven usable first.
     reg=load_target_registry(template)
-    registry_info=validate_target_registry(reg,use_hbm,log)
+    registry_info=validate_target_registry(reg,use_hbm,log,mapping_profile=profile)
+    current_fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y)
 
     report={
         "tool_version":TOOL_VERSION,"source":str(source),"template":str(template),"output":str(output),
-        "settings":{"use_hbm_architectural":use_hbm,"vertical_offset":y_offset,"strip_below_y":strip_below_y},
+        "settings":{
+            "use_hbm_architectural":use_hbm,
+            "allow_safe_mod_replacements":bool(use_hbm),
+            "vertical_offset":y_offset,
+            "strip_below_y":strip_below_y,
+        },
+        "mapping_profile":profile.to_dict(),
         "target_registry":registry_info,"preflight":{},
+        "preflight_reused":False,
         "regions_total":0,"regions_converted":0,"chunks_converted":0,"chunks_failed":0,
         "chunks_cropped_above_255":0,"chunks_cropped_below_0":0,
         "data_versions":collections.Counter(),"palette_seen":collections.Counter(),
@@ -1234,8 +1435,24 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
         if not regions:
             raise ConversionError("Source contains no non-empty Anvil region files")
         log("Found %d non-empty region files"%len(regions))
-        log("Running source/target mapping preflight before creating the output world...")
-        report["preflight"]=preflight_source_mappings(regions,reg,use_hbm,y_offset,log)
+        reusable=(
+            isinstance(verified_preflight,dict)
+            and bool(verified_preflight.get("ready"))
+            and verified_preflight.get("fingerprint") == current_fingerprint
+            and isinstance(verified_preflight.get("preflight"),dict)
+        )
+        if reusable:
+            report["preflight"]=dict(verified_preflight["preflight"])
+            report["preflight_reused"]=True
+            log("Reusing the verified read-only preflight; source, template, settings and active catalogs are unchanged.")
+        else:
+            if verified_preflight:
+                log("Stored preflight no longer matches the current conversion inputs; running it again before output creation.")
+            else:
+                log("Running source/target mapping preflight before creating the output world...")
+            report["preflight"]=preflight_source_mappings(
+                regions,reg,use_hbm,y_offset,log,mapping_profile=profile
+            )
 
         # Only now is it safe to clone the target template. Any catastrophic
         # registry/mapping mismatch above leaves the requested output untouched.
@@ -1248,7 +1465,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             try:
                 for idx,raw in RegionReader(rp).chunks():
                     try:
-                        (cx,cz),legacy=convert_chunk(raw,reg,use_hbm,y_offset,strip_below_y,report)
+                        (cx,cz),legacy=convert_chunk(raw,reg,use_hbm,y_offset,strip_below_y,report,mapping_profile=profile)
                         local=(cx&31)+((cz&31)*32)
                         chunks[local]=legacy; report["chunks_converted"]+=1
                     except Exception as e:
@@ -1270,11 +1487,18 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
     serial["mapping_quality"]={k:sorted(v) for k,v in report["mapping_quality"].items()}
     serial["failure_counts"]=dict(report["failure_counts"])
     (output/"WG_BACKPORT_REPORT.json").write_text(json.dumps(serial,indent=2,sort_keys=True),encoding="utf-8")
+    profile_dict=profile.to_dict()
+    profile_mods=", ".join(profile_dict.get("enabled_mod_ids") or []) or "none"
     lines=[
         "WG Modern -> 1.7.10 Backport Report", "====================================", "",
         "Target registry: %s"%reg.summary(),
+        "Mapping profile: %s"%profile_dict.get("mode","unknown"),
+        "Enabled catalog mod namespaces: %s"%profile_mods,
+        "Verified preflight reused: %s"%("yes" if report.get("preflight_reused") else "no"),
         "Preflight chunks: %d"%report["preflight"].get("chunks",0),
-        "Preflight unique in-range palette states: %d"%report["preflight"].get("unique_palette_states",0), "",
+        "Preflight unique in-range palette states: %d"%report["preflight"].get("unique_palette_states",0),
+        "Potential crop above Y=255: %d chunk(s)"%report["preflight"].get("potential_chunks_cropped_above_255",0),
+        "Potential crop below Y=0: %d chunk(s)"%report["preflight"].get("potential_chunks_cropped_below_0",0), "",
         "Converted regions: %d / %d"%(report["regions_converted"],report["regions_total"]),
         "Converted chunks: %d"%report["chunks_converted"], "Failed chunks: %d"%report["chunks_failed"],
         "Chunks with source blocks cropped above Y=255: %d"%report["chunks_cropped_above_255"],

@@ -107,3 +107,23 @@ Repository/runtime validation covers the following invariants:
 - the desktop UI distinguishes a clean conversion from a conversion that completed with chunk failures.
 
 For a packaged functional test, use a newly created/saved Forge 1.7.10 template and a new empty output path. The conversion log should identify the registry as `Forge 1.7.10 FML/ItemData`, report a nonzero HBM count when HBM is installed in that template, complete the source/target preflight, and only then state that the template was cloned and conversion started.
+
+
+## Active catalog mapping-profile and reusable preflight validation
+
+The packaged desktop application links **Catalog Workspace** to **Map Backporter**. Enabled catalog sources provide the mod namespaces that are eligible for reviewed safe mapping rules; the target/template world's Forge registry still determines whether a concrete target block actually exists. A catalog never automatically invents an unreviewed source→target mapping pair.
+
+Verify the following:
+
+- load an HBM catalog, leave it enabled, and confirm Map Backporter reports `hbm` in the active catalog namespaces;
+- disable that catalog and confirm the Backporter immediately marks the existing preflight stale and reports that safe mod rules will fall back to vanilla targets;
+- re-enable HBM and confirm a new preflight can use reviewed HBM architectural targets when those targets exist in the template registry;
+- enable a catalog for a mod with no reviewed mapping rules and confirm it is reported in the profile without causing arbitrary target substitutions;
+- changing source, template, target version, vertical offset, strip/fill setting, safe-mod replacement setting, or enabled catalog state invalidates the previous preflight;
+- changing only the output folder does not invalidate a still-current read-only preflight;
+- `Convert map` remains disabled until the exact current inputs have a successful preflight;
+- a successful preflight creates no output world and reports target registry information, mapping-profile information, source chunk count, unique in-range palette-state count, and potential Y-range cropping;
+- an unchanged preflight is reused by conversion rather than scanning every source chunk twice;
+- if files/settings/catalogs change after preflight, the engine fingerprint refuses to reuse the stale result and reruns preflight before output creation;
+- the 1.7.10 target exposes a **Use recommended** action that selects vertical offset `0` and strip/fill below Y `0` for normal surface/RTG alignment;
+- `WG_BACKPORT_REPORT.json` and `.txt` record the mapping profile and whether the verified preflight was reused.

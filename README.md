@@ -25,9 +25,10 @@ It can:
 - resolve the target world's persisted Forge/FML registry instead of hard-coding mod numeric IDs,
 - write legacy `Blocks`, `Data`, and `Add` arrays,
 - preserve and translate surface structures while reporting unavoidable height loss,
-- apply conservative HBM architectural substitutions,
+- apply conservative, reviewed mod architectural substitutions only from namespaces enabled in Catalog Workspace,
 - leave source/template inputs untouched,
-- generate conversion reports for approximate, unsupported, and cropped blocks.
+- run a read-only conversion preflight before output creation and reuse it when the source/template/settings/catalog profile remain unchanged,
+- generate conversion reports for approximate, unsupported, cropped, and active mapping-profile decisions.
 
 The original large validation map used during development contains 34 populated regions and 27,761 populated chunks and uses a modern palette-based chunk format.
 
@@ -53,7 +54,7 @@ Local instances, ZIPs, and CurseForge-style exports can be scanned to build a co
 
 ### Catalog Workspace
 
-The workspace can combine multiple individual mod catalogs and modpack analyses at the same time. Each loaded catalog can be enabled/disabled independently, removed, searched as part of the active target-block pool, and saved in a reusable workspace JSON. This active catalog set is the basis for future reusable mapping profiles and visual source→target suggestions.
+The workspace can combine multiple individual mod catalogs and modpack analyses at the same time. Each loaded catalog can be enabled/disabled independently, removed, searched as part of the active target-block pool, and saved in a reusable workspace JSON. The Map Backporter now consumes that enabled set as a live mapping profile: enabled mod IDs permit the converter's reviewed safe rules for those namespaces, while the target world's Forge registry remains authoritative for the actual block IDs. Catalogs do not automatically invent unreviewed source→target mappings.
 
 ## Target versions
 
@@ -65,7 +66,7 @@ Planned future work includes:
 
 - visual block-mapping workspace,
 - texture/material/geometry similarity scoring,
-- reusable mapping profiles,
+- manual/visual source→target mapping overrides layered on top of the live catalog-gated profile,
 - richer Forge/Fabric/NeoForge mod analysis,
 - CurseForge/Modrinth dependency resolution,
 - validated 1.12.2 and 1.16.5 writers,
@@ -122,7 +123,7 @@ The publishing job refuses to create the GitHub Release unless **both** platform
 
 The repository uses two long-lived branches:
 
-- `dev` is the active development/staging branch. Every push runs CI and produces temporary, validated macOS Apple Silicon and Windows x64 installer artifacts. Development artifacts are retained for 14 days and are **not** published as GitHub Releases.
+- `dev` is the active development/staging branch. Every push runs CI and produces temporary, validated macOS Apple Silicon and Windows x64 installer artifacts. Development artifacts have a 7-day fallback retention and are **not** published as GitHub Releases.
 - `main` is the stable public-release branch. Changes should normally reach `main` through a pull request from `dev`. A Community Release is created only when the release version is intentionally advanced, or when the initial version is explicitly published through the workflow's manual control.
 
 A normal development cycle is therefore `feature/fix work → dev → validated development artifacts → dev-to-main release PR → main → validated Community Release`.
