@@ -592,10 +592,16 @@ class BackportTab(AsyncTab):
             self._preflight_token = request_token
             p = rep.get("preflight") or {}
             profile = rep.get("mapping_profile") or {}
+            content = p.get("content_audit") or {}
+            be_count = int(content.get("block_entities_total", 0) or 0)
+            entity_total = content.get("entities_total")
+            entity_text = "entity audit unavailable" if entity_total is None else f"{int(entity_total):,} entities"
+            warning = " • content-loss manifest" if be_count or (entity_total not in (None, 0)) or content.get("entity_scan_status") == "unavailable" else ""
             self.preflight_status.setText(
                 f"READY • {rep.get('regions', 0):,} regions • {p.get('chunks', 0):,} chunks • "
                 f"{p.get('unique_palette_states', 0):,} unique in-range palette states • "
-                f"{len(profile.get('enabled_catalogs') or []):,} enabled catalog(s)"
+                f"{be_count:,} block entities • {entity_text} • "
+                f"{len(profile.get('enabled_catalogs') or []):,} enabled catalog(s){warning}"
             )
             self._set_busy(False)
             summary = {
@@ -606,10 +612,24 @@ class BackportTab(AsyncTab):
                 "preflight": rep.get("preflight"),
             }
             self._log("\nPreflight summary:\n" + json.dumps(summary, indent=2, ensure_ascii=False)[:16000])
+            content = p.get("content_audit") or {}
+            be_count = int(content.get("block_entities_total", 0) or 0)
+            entity_total = content.get("entities_total")
+            if entity_total is None:
+                content_line = (
+                    f"{be_count:,} block entity record(s) were found. Entity-region data could not be audited from this input form. "
+                    "The current backend reports these records but does not translate entities/block entities yet."
+                )
+            else:
+                content_line = (
+                    f"{be_count:,} block entity record(s) and {int(entity_total):,} entity record(s) were found. "
+                    "The current backend reports them in the loss manifest but does not translate them yet."
+                )
             QMessageBox.information(
                 self,
                 "Conversion preflight ready",
                 f"Validated {p.get('chunks', 0):,} source chunks against the target registry and active mapping profile. "
+                f"{content_line} Output chunks will request a target-side relight. "
                 "No output world was created. Convert map is now enabled.",
             )
 
@@ -682,11 +702,16 @@ class BackportTab(AsyncTab):
                     {
                         k: rep.get(k)
                         for k in (
+                            "output_promoted",
                             "regions_converted",
+                            "regions_verified",
                             "chunks_converted",
+                            "chunks_verified",
                             "chunks_failed",
                             "chunks_cropped_above_255",
                             "chunks_cropped_below_0",
+                            "block_entities_omitted",
+                            "entities_omitted",
                             "preflight_reused",
                         )
                     },
@@ -694,17 +719,30 @@ class BackportTab(AsyncTab):
                 )
             )
             failed = int(rep.get("chunks_failed", 0) or 0)
-            if failed:
+            promoted = bool(rep.get("output_promoted"))
+            if failed or not promoted:
+                failure_report = rep.get("failure_report_txt") or "the external failure report"
                 QMessageBox.warning(
                     self,
-                    "Backport finished with failures",
-                    f"Conversion completed, but {failed:,} chunk(s) failed. Do not use the output world yet; review WG_BACKPORT_REPORT.txt first.",
+                    "Backport not promoted",
+                    f"The staged conversion was not promoted to the requested output world. "
+                    f"{failed:,} chunk/verification failure(s) were recorded. "
+                    f"The requested output remains absent; review {failure_report}.",
                 )
             else:
+                be_count = int(rep.get("block_entities_omitted", 0) or 0)
+                entity_total = rep.get("entities_omitted")
+                if entity_total is None:
+                    loss_text = f"{be_count:,} block entity record(s) were omitted; source entities could not be quantified from the selected input form."
+                else:
+                    loss_text = f"{be_count:,} block entity record(s) and {int(entity_total):,} entity record(s) were omitted and listed in the report."
                 QMessageBox.information(
                     self,
-                    "Backport complete",
-                    "Conversion finished with no chunk failures. Review WG_BACKPORT_REPORT.txt in the output world before opening it in Minecraft.",
+                    "Backport complete and verified",
+                    "Conversion finished with zero chunk failures, every written region passed round-trip structural verification, "
+                    "and the staged world was promoted to the requested output. "
+                    f"{loss_text} The legacy chunks request target-side relighting. "
+                    "Review WG_BACKPORT_REPORT.txt before opening the world in Minecraft.",
                 )
 
         def err(tb):

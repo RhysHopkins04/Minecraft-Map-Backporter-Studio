@@ -368,7 +368,7 @@ for token in [
     'def _conversion_fingerprint(',
     'Reusing the verified read-only preflight',
     'Stored preflight no longer matches the current conversion inputs',
-    'Running source/target mapping preflight before creating the output world...',
+    'Running source/target mapping preflight before output staging...',
     'report["preflight"]=preflight_source_mappings',
     '"failure_counts":collections.Counter()',
     'max_failure_examples=200',
@@ -381,9 +381,9 @@ run_start = legacy.find("def run_conversion(")
 run_end = legacy.find("# ---------- Map analyzer", run_start)
 run_body = legacy[run_start:run_end] if run_start >= 0 and run_end > run_start else ""
 preflight_pos = run_body.find('preflight_source_mappings(')
-clone_pos = run_body.find('ensure_output(template,output)')
-if preflight_pos < 0 or clone_pos < 0 or preflight_pos > clone_pos:
-    error("run_conversion must finish target/source preflight before cloning the template output")
+stage_pos = run_body.find('_prepare_staging_output(template,output)')
+if preflight_pos < 0 or stage_pos < 0 or preflight_pos > stage_pos:
+    error("run_conversion must finish target/source preflight before creating the staging output")
 
 test_smoke_path = root / "tests/test_smoke.py"
 test_smoke = test_smoke_path.read_text(encoding="utf-8") if test_smoke_path.exists() else ""
@@ -412,12 +412,54 @@ for token in [
         error(f"Legacy analyzer regression test missing: {token}")
 
 for token in [
-    '"Backport finished with failures"',
-    'if failed:',
-    'Conversion finished with no chunk failures.',
+    '"Backport not promoted"',
+    'if failed or not promoted:',
+    '"Backport complete and verified"',
+    '"output_promoted"',
+    '"chunks_verified"',
 ]:
     if token not in main_window:
         error(f"Backporter result-state UI invariant missing: {token}")
+
+# Patch 013 makes unsupported world content explicit, stages output until it is
+# structurally verified, and leaves legacy chunks marked for target-side relight.
+for token in [
+    'CONTENT_POLICY = "terrain_blocks_with_loss_manifest"',
+    'LIGHTING_STRATEGY = "target_runtime_relight"',
+    'HEIGHTMAP_STRATEGY = "bootstrap_highest_non_air"',
+    'BLOCK_PROPERTY_STRATEGY = "source_properties_to_legacy_metadata_plus_runtime_neighbors"',
+    '"block_entities":[]',
+    'elif k == "block_entities" and t == 9:',
+    'def discover_source_entity_regions(',
+    'def audit_source_entities(',
+    'def attach_content_audit(',
+    'def validate_legacy_chunk_nbt(',
+    'def verify_written_region(',
+    'def _prepare_staging_output(',
+    'def _promote_staging_output(',
+    '"output_promoted":False',
+    '"block_entities_omitted":0',
+    '"unique_palette_states_with_properties":property_states',
+    '"property_keys_seen":dict(property_keys)',
+    '"entities_omitted":None',
+    'LightPopulated=0',
+    'created a hidden staging clone',
+    'Conversion was NOT promoted',
+    'Staged world passed round-trip verification',
+]:
+    if token not in legacy:
+        error(f"Patch 013 world-content/staging invariant missing: {token}")
+
+for token in [
+    'f"{be_count:,} block entities',
+    'content-loss manifest',
+    'Output chunks will request a target-side relight.',
+    '"Backport not promoted"',
+    '"Backport complete and verified"',
+    'every written region passed round-trip structural verification',
+]:
+    if token not in main_window:
+        error(f"Patch 013 desktop content/verification UI invariant missing: {token}")
 
 for token in [
     "class _AdaptiveHeaderTable(QTableWidget)",
@@ -555,6 +597,30 @@ for token in [
 ]:
     if token not in test_smoke:
         error(f"Catalog-bound mapping-profile regression test missing: {token}")
+
+for token in [
+    "def test_content_audit_and_legacy_roundtrip():",
+    'assert parsed["block_entities"][0]["id"] == "minecraft:chest"',
+    'assert legacy1710_engine.verify_written_region(region, {0}) == 1',
+    'assert audit["entity_types"]["minecraft:cow"] == 1',
+    "def test_staged_output_promotion():",
+    'assert not output.exists()',
+    'legacy1710_engine._promote_staging_output(staging, output)',
+]:
+    if token not in test_smoke:
+        error(f"Patch 013 world-content/staging regression test missing: {token}")
+
+for token in [
+    "def test_content_audit_and_legacy_roundtrip():",
+    'assert parsed["block_entities"][0]["id"] == "minecraft:chest"',
+    'assert legacy1710_engine.verify_written_region(region, {0}) == 1',
+    'assert audit["entity_types"]["minecraft:cow"] == 1',
+    "def test_staged_output_promotion():",
+    'assert not output.exists()',
+    'legacy1710_engine._promote_staging_output(staging, output)',
+]:
+    if token not in test_smoke:
+        error(f"Patch 013 world-content/staging regression test missing: {token}")
 
 for forbidden in [
     "setSectionResizeMode(0, QHeaderView.Stretch)",

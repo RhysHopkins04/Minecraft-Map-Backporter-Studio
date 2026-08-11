@@ -142,6 +142,70 @@ def test_catalog_bound_mapping_profile():
     assert "Catalog Workspace" in fallback.note
 
 
+
+def _nbt_string_payload(value: str) -> bytes:
+    return legacy1710_engine.nbt_name(value)
+
+
+def test_content_audit_and_legacy_roundtrip():
+    be = legacy1710_engine.p_compound([
+        legacy1710_engine.tag(8, "id", _nbt_string_payload("minecraft:chest")),
+        legacy1710_engine.tag(3, "x", legacy1710_engine.p_int(1)),
+        legacy1710_engine.tag(3, "y", legacy1710_engine.p_int(64)),
+        legacy1710_engine.tag(3, "z", legacy1710_engine.p_int(2)),
+    ])
+    modern = bytes([10]) + legacy1710_engine.nbt_name("") + legacy1710_engine.p_compound([
+        legacy1710_engine.tag(3, "DataVersion", legacy1710_engine.p_int(3465)),
+        legacy1710_engine.tag(3, "xPos", legacy1710_engine.p_int(0)),
+        legacy1710_engine.tag(3, "zPos", legacy1710_engine.p_int(0)),
+        legacy1710_engine.tag(9, "sections", legacy1710_engine.p_list(10, [])),
+        legacy1710_engine.tag(9, "block_entities", legacy1710_engine.p_list(10, [be])),
+    ])
+    parsed = legacy1710_engine.parse_modern_chunk(modern)
+    assert parsed["block_entities"][0]["id"] == "minecraft:chest"
+
+    legacy = legacy1710_engine.make_chunk_nbt(
+        0, 0, 0, [], [0] * 256, [1] * 256
+    )
+    info = legacy1710_engine.validate_legacy_chunk_nbt(legacy, 0, 0)
+    assert info["xPos"] == 0 and info["zPos"] == 0
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        region = td / "r.0.0.mca"
+        legacy1710_engine.write_region(region, {0: legacy})
+        assert legacy1710_engine.verify_written_region(region, {0}) == 1
+
+        world = td / "world"
+        (world / "entities").mkdir(parents=True)
+        entity = legacy1710_engine.p_compound([
+            legacy1710_engine.tag(8, "id", _nbt_string_payload("minecraft:cow")),
+        ])
+        entity_chunk = bytes([10]) + legacy1710_engine.nbt_name("") + legacy1710_engine.p_compound([
+            legacy1710_engine.tag(9, "Entities", legacy1710_engine.p_list(10, [entity])),
+        ])
+        legacy1710_engine.write_region(world / "entities" / "r.0.0.mca", {0: entity_chunk})
+        audit = legacy1710_engine.audit_source_entities(world, td / "scratch", log=lambda _: None)
+        assert audit["scan_status"] == "scanned"
+        assert audit["entities_total"] == 1
+        assert audit["entity_types"]["minecraft:cow"] == 1
+
+
+def test_staged_output_promotion():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        template = td / "template"
+        template.mkdir()
+        (template / "level.dat").write_bytes(b"template")
+        output = td / "output"
+        output.mkdir()
+        staging = legacy1710_engine._prepare_staging_output(template, output)
+        assert not output.exists()
+        assert (staging / "level.dat").read_bytes() == b"template"
+        (staging / "marker.txt").write_text("verified", encoding="utf-8")
+        legacy1710_engine._promote_staging_output(staging, output)
+        assert (output / "marker.txt").read_text(encoding="utf-8") == "verified"
+
 def main():
     assert TARGET_BY_VERSION["1.7.10"].backend == "legacy1710"
     assert TARGET_BY_VERSION["1.7.10"].recommended_y_offset == 0
@@ -150,6 +214,8 @@ def main():
     assert hasattr(legacy1710_engine, "run_conversion_preflight")
     test_forge1710_itemdata_registry()
     test_catalog_bound_mapping_profile()
+    test_content_audit_and_legacy_roundtrip()
+    test_staged_output_promotion()
     assert packaged_self_test() == 0
     with tempfile.TemporaryDirectory() as td:
         td = Path(td); jar = td / "demo.jar"; make_fake_jar(jar)

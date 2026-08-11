@@ -21,14 +21,19 @@ The current working backend converts modern palette-based Minecraft Java Anvil c
 It can:
 
 - read a world folder, `region` folder, ZIP, or individual `.mca` file,
-- clone a real 1.7.10 Forge target/template world,
+- stage a clone of a real 1.7.10 Forge target/template world and only promote it after successful conversion/verification,
 - resolve the target world's persisted Forge/FML registry instead of hard-coding mod numeric IDs,
 - write legacy `Blocks`, `Data`, and `Add` arrays,
 - preserve and translate surface structures while reporting unavoidable height loss,
 - apply conservative, reviewed mod architectural substitutions only from namespaces enabled in Catalog Workspace,
 - leave source/template inputs untouched,
 - run a read-only conversion preflight before output creation and reuse it when the source/template/settings/catalog profile remain unchanged,
-- generate conversion reports for approximate, unsupported, cropped, and active mapping-profile decisions.
+- audit modern block entities and, when a full world/ZIP exposes them, modern entity-region records before conversion,
+- write an explicit loss manifest for entities/block entities that the current terrain-focused backend does not yet translate,
+- translate modern block-state properties into legacy metadata where that state exists, while leaving legacy runtime-neighbour-derived shapes/connections to the target runtime,
+- emit legacy chunks with a bootstrap heightmap and `LightPopulated=0` so target-side relighting is requested,
+- round-trip validate every written legacy chunk/region before the staged world can be promoted,
+- generate conversion reports for approximate, unsupported, cropped, active mapping-profile, content-loss, lighting, and verification decisions.
 
 The original large validation map used during development contains 34 populated regions and 27,761 populated chunks and uses a modern palette-based chunk format.
 

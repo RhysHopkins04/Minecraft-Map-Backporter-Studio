@@ -127,3 +127,40 @@ Verify the following:
 - if files/settings/catalogs change after preflight, the engine fingerprint refuses to reuse the stale result and reruns preflight before output creation;
 - the 1.7.10 target exposes a **Use recommended** action that selects vertical offset `0` and strip/fill below Y `0` for normal surface/RTG alignment;
 - `WG_BACKPORT_REPORT.json` and `.txt` record the mapping profile and whether the verified preflight was reused.
+
+
+## World-content audit, staged output, and legacy round-trip validation
+
+Patch 013 deliberately separates **terrain/block conversion** from world content that is not yet safe to translate across modern Java → Forge 1.7.10.
+
+Before conversion, verify that:
+
+- modern chunk `block_entities` are counted by ID during preflight instead of being silently ignored;
+- when the selected source is a full world folder, a `region` folder with a sibling `entities` folder, or a ZIP containing `entities/*.mca`, modern entity-region records are counted by ID;
+- region-only inputs that do not expose entity-region data are reported as `entity audit unavailable` rather than being treated as zero entities;
+- the preflight summary clearly states that entities/block entities are currently placed in a loss manifest and are not yet translated;
+- the conversion fingerprint includes sibling entity-region files for directory-based world inputs so entity changes make a previous preflight stale.
+
+The current 1.7.10 writer must continue to:
+
+- serialize `Entities` and `TileEntities` as empty legacy lists until an explicit translator exists;
+- report the number/type of omitted block entities and audited source entities;
+- identify the content policy as `terrain_blocks_with_loss_manifest`;
+- identify the block-property strategy as `source_properties_to_legacy_metadata_plus_runtime_neighbors`;
+- report how many unique source palette states carried properties and which property keys were observed;
+- identify the lighting strategy as `target_runtime_relight`;
+- identify the bootstrap heightmap strategy as `bootstrap_highest_non_air`;
+- serialize output chunks with `LightPopulated=0`.
+
+Before a requested output world is exposed, verify the staged-output lifecycle:
+
+1. preflight completes successfully;
+2. a hidden sibling staging clone is created;
+3. converted chunk NBT is structurally checked before region writing;
+4. each completed region is reopened through the Anvil reader;
+5. every written chunk is validated for coordinate/index agreement, section Y bounds, array lengths, biome/heightmap sizes, and `LightPopulated=0`;
+6. only a zero-failure, fully round-trip-verified staging world is promoted to the requested output path.
+
+If any chunk or round-trip verification fails, the requested output world must remain absent. The staging directory must be cleaned up, and external `<output>.WG_BACKPORT_FAILED_REPORT.json/.txt` diagnostics must be written beside the requested output location.
+
+For the next packaged functional conversion test, use a disposable output path and first run **Preflight conversion**. Confirm the content-audit counts are plausible before clicking Convert. On a successful conversion, confirm the report says `Output status: PROMOTED`, converted/verified region and chunk counts match, the loss manifest is explicit, and the application says the output requests target-side relighting. Only then open the converted world in the exact target Forge 1.7.10 modpack.

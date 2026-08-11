@@ -39,8 +39,17 @@ try:
 except Exception:
     np = None
 
-TOOL_VERSION = "0.2.1"
+TOOL_VERSION = "0.2.2"
 AIR_NAMES = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
+
+# Patch 013 keeps conversion correctness conservative: terrain/block states are
+# converted, while modern entities and block entities are audited and reported
+# instead of being silently discarded. Legacy output chunks are emitted with
+# LightPopulated=0 so the target 1.7.10 runtime can perform its own relight pass.
+CONTENT_POLICY = "terrain_blocks_with_loss_manifest"
+LIGHTING_STRATEGY = "target_runtime_relight"
+HEIGHTMAP_STRATEGY = "bootstrap_highest_non_air"
+BLOCK_PROPERTY_STRATEGY = "source_properties_to_legacy_metadata_plus_runtime_neighbors"
 
 # Minecraft dye/block metadata ordering in legacy 1.7.10.
 COLOR_META = {
@@ -277,7 +286,10 @@ def parse_section(r: Reader):
 def parse_modern_chunk(raw: bytes):
     r=Reader(raw); rt=r.u8(); r.string()
     if rt != 10: raise ConversionError("Modern chunk root is not a compound")
-    out={"xPos":None,"zPos":None,"LastUpdate":0,"DataVersion":None,"sections":[]}
+    out={
+        "xPos":None,"zPos":None,"LastUpdate":0,"DataVersion":None,
+        "sections":[],"block_entities":[],
+    }
     while True:
         t=r.u8()
         if t == 0: break
@@ -289,6 +301,12 @@ def parse_modern_chunk(raw: bytes):
         elif k == "sections" and t == 9:
             et=r.u8(); n=r.i32()
             if et == 10: out["sections"]=[parse_section(r) for _ in range(n)]
+            else:
+                for _ in range(n): skip_payload(r,et)
+        elif k == "block_entities" and t == 9:
+            et=r.u8(); n=r.i32()
+            if et == 10:
+                out["block_entities"]=[read_payload(r,10) for _ in range(n)]
             else:
                 for _ in range(n): skip_payload(r,et)
         else: skip_payload(r,t)
@@ -978,6 +996,8 @@ def preflight_source_mappings(
     unresolved={}; parse_failures=[]; mapped_targets=collections.Counter()
     mapping_quality=collections.defaultdict(set); mod_targets=collections.Counter()
     crop_high_chunks=0; crop_low_chunks=0
+    block_entity_types=collections.Counter()
+    property_states=0; property_keys=collections.Counter()
 
     for ri,rp in enumerate(regions,1):
         if ri == 1 or ri == len(regions) or ri % 5 == 0:
@@ -988,6 +1008,11 @@ def preflight_source_mappings(
                 try:
                     c=parse_modern_chunk(raw)
                     chunks+=1; dvs[str(c.get("DataVersion"))]+=1
+                    for be in c.get("block_entities") or []:
+                        if isinstance(be,dict):
+                            block_entity_types[str(be.get("id") or "<unknown>")]+=1
+                        else:
+                            block_entity_types["<malformed>"]+=1
                     chunk_high=False; chunk_low=False
                     for section in c["sections"]:
                         sy=section.get("Y"); palette=section.get("palette") or []
@@ -1006,6 +1031,10 @@ def preflight_source_mappings(
                             sig=_palette_signature(name,props)
                             if sig in unique: continue
                             unique.add(sig)
+                            if props:
+                                property_states+=1
+                                for prop_key in props:
+                                    property_keys[str(prop_key)]+=1
                             try:
                                 mapping=map_modern(name,props,reg,use_hbm,mapping_profile)
                                 _,_,resolved=resolve_mapping(mapping,reg)
@@ -1062,6 +1091,15 @@ def preflight_source_mappings(
         "mapping_quality":{k:sorted(v) for k,v in mapping_quality.items()},
         "safe_mod_target_names":sorted(mod_targets),
         "safe_mod_target_count":len(mod_targets),
+        "content_policy":CONTENT_POLICY,
+        "block_entities_total":sum(block_entity_types.values()),
+        "block_entity_types":dict(block_entity_types),
+        "lighting_strategy":LIGHTING_STRATEGY,
+        "heightmap_strategy":HEIGHTMAP_STRATEGY,
+        "block_property_strategy":BLOCK_PROPERTY_STRATEGY,
+        "target_relight_required":True,
+        "unique_palette_states_with_properties":property_states,
+        "property_keys_seen":dict(property_keys),
     }
     log(
         "Preflight passed: %d chunks; %d unique in-range palette states; DataVersion(s): %s"
@@ -1155,6 +1193,82 @@ def write_region(path, chunks_by_index):
     with path.open("wb") as f: f.write(loc); f.write(times); f.write(body)
 
 
+def validate_legacy_chunk_nbt(raw: bytes, expected_cx=None, expected_cz=None):
+    """Validate the structural invariants required by the legacy 1.7.10 writer."""
+    try:
+        _,root=parse_nbt(raw)
+    except Exception as exc:
+        raise ConversionError("Generated legacy chunk NBT is unreadable: %s"%exc) from exc
+    if not isinstance(root,dict) or not isinstance(root.get("Level"),dict):
+        raise ConversionError("Generated legacy chunk is missing the Level compound")
+    level=root["Level"]
+    cx=level.get("xPos"); cz=level.get("zPos")
+    if expected_cx is not None and cx != expected_cx:
+        raise ConversionError("Generated legacy chunk xPos mismatch: expected %s, got %s"%(expected_cx,cx))
+    if expected_cz is not None and cz != expected_cz:
+        raise ConversionError("Generated legacy chunk zPos mismatch: expected %s, got %s"%(expected_cz,cz))
+
+    biomes=level.get("Biomes")
+    heightmap=level.get("HeightMap")
+    if not isinstance(biomes,(bytes,bytearray)) or len(biomes)!=256:
+        raise ConversionError("Generated legacy chunk Biomes array is not exactly 256 bytes")
+    if not isinstance(heightmap,list) or len(heightmap)!=256:
+        raise ConversionError("Generated legacy chunk HeightMap is not exactly 256 integers")
+    if level.get("LightPopulated") != 0:
+        raise ConversionError("Generated legacy chunk must keep LightPopulated=0 for target relight")
+
+    sections=level.get("Sections",[])
+    if not isinstance(sections,list):
+        raise ConversionError("Generated legacy chunk Sections tag is not a list")
+    seen_y=set()
+    for sec in sections:
+        if not isinstance(sec,dict):
+            raise ConversionError("Generated legacy chunk contains a non-compound section")
+        sy=sec.get("Y")
+        if not isinstance(sy,int) or not (0<=sy<=15) or sy in seen_y:
+            raise ConversionError("Generated legacy chunk has invalid/duplicate section Y=%r"%sy)
+        seen_y.add(sy)
+        expected_lengths={"Blocks":4096,"Data":2048,"BlockLight":2048,"SkyLight":2048}
+        for key,length in expected_lengths.items():
+            value=sec.get(key)
+            if not isinstance(value,(bytes,bytearray)) or len(value)!=length:
+                raise ConversionError("Generated section Y=%d has invalid %s length"%(sy,key))
+        if "Add" in sec:
+            add=sec["Add"]
+            if not isinstance(add,(bytes,bytearray)) or len(add)!=2048:
+                raise ConversionError("Generated section Y=%d has invalid Add length"%sy)
+
+    if not isinstance(level.get("Entities",[]),list):
+        raise ConversionError("Generated legacy chunk Entities tag is not a list")
+    if not isinstance(level.get("TileEntities",[]),list):
+        raise ConversionError("Generated legacy chunk TileEntities tag is not a list")
+    return {"xPos":cx,"zPos":cz,"sections":len(sections)}
+
+
+def verify_written_region(path: Path, expected_chunks):
+    """Round-trip the just-written Anvil region and validate every promoted chunk."""
+    expected=set(int(x) for x in expected_chunks)
+    seen=set()
+    for idx,raw in RegionReader(path).chunks():
+        if idx not in expected:
+            raise ConversionError("Output region %s contains unexpected chunk index %d"%(Path(path).name,idx))
+        info=validate_legacy_chunk_nbt(raw)
+        local=(int(info["xPos"])&31)+((int(info["zPos"])&31)*32)
+        if local != idx:
+            raise ConversionError(
+                "Output region %s chunk index %d does not match xPos/zPos-derived index %d"
+                %(Path(path).name,idx,local)
+            )
+        seen.add(idx)
+    missing=expected-seen
+    if missing:
+        raise ConversionError(
+            "Output region %s is missing %d written chunk(s): %s"
+            %(Path(path).name,len(missing),", ".join(str(x) for x in sorted(missing)[:12]))
+        )
+    return len(seen)
+
+
 def choose_biomes(sections):
     # Prefer a section near old sea level; fallback to the nearest section with biome data.
     candidates=[s for s in sections if s.get("biome_palette")]
@@ -1179,6 +1293,12 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
     if cx is None or cz is None: raise ConversionError("Chunk missing xPos/zPos")
     dv=c.get("DataVersion")
     stats["data_versions"][str(dv)]+=1
+    for be in c.get("block_entities") or []:
+        stats["block_entities_omitted"]+=1
+        if isinstance(be,dict):
+            stats["block_entity_types_omitted"][str(be.get("id") or "<unknown>")]+=1
+        else:
+            stats["block_entity_types_omitted"]["<malformed>"]+=1
     height=np.zeros((16,16),dtype=np.int32)
     converted=[]
     sec_by_target={}
@@ -1242,7 +1362,9 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
         converted.append(make_section_nbt(ty,ids,metas,pack_nibbles(sky)))
 
     biomes=choose_biomes(c["sections"])
-    return (cx,cz),make_chunk_nbt(cx,cz,c.get("LastUpdate",0),converted,height.reshape(-1).tolist(),biomes)
+    legacy=make_chunk_nbt(cx,cz,c.get("LastUpdate",0),converted,height.reshape(-1).tolist(),biomes)
+    validate_legacy_chunk_nbt(legacy,cx,cz)
+    return (cx,cz),legacy
 
 
 def discover_source_regions(source: Path, tempdir: Path):
@@ -1269,14 +1391,161 @@ def discover_source_regions(source: Path, tempdir: Path):
     raise ConversionError("Source must be a modern world folder, region folder, .mca file, or ZIP containing region/*.mca")
 
 
-def ensure_output(template: Path, output: Path):
+def discover_source_entity_regions(source: Path, tempdir: Path):
+    """Return a modern entity-region directory when the supplied source exposes one.
+
+    Modern Java worlds store non-block entities separately from terrain region
+    files. Region-only inputs cannot prove whether such entity data exists, so
+    callers receive None and must report the audit as unavailable instead of
+    silently assuming zero entities.
+    """
+    source=Path(source).resolve()
+    if source.is_file() and source.suffix.lower()==".zip":
+        out=tempdir/"source_entities"; out.mkdir(parents=True,exist_ok=True)
+        found=0
+        with zipfile.ZipFile(source) as z:
+            for info in z.infolist():
+                low=("/"+info.filename).lower()
+                if info.is_dir() or not low.endswith(".mca"):
+                    continue
+                if "/entities/" not in low:
+                    continue
+                name=Path(info.filename).name
+                if not re.match(r"r\.-?\d+\.-?\d+\.mca$",name):
+                    continue
+                with z.open(info) as fi, (out/name).open("wb") as fo:
+                    shutil.copyfileobj(fi,fo,1024*1024)
+                found+=1
+        return out if found else None
+
+    if source.is_dir():
+        if (source/"entities").is_dir():
+            return source/"entities"
+        if source.name.lower()=="region" and (source.parent/"entities").is_dir():
+            return source.parent/"entities"
+        return None
+
+    if source.is_file() and source.suffix.lower()==".mca":
+        if source.parent.name.lower()=="region" and (source.parent.parent/"entities").is_dir():
+            return source.parent.parent/"entities"
+    return None
+
+
+def audit_source_entities(source: Path, tempdir: Path, log=print):
+    entity_dir=discover_source_entity_regions(Path(source),tempdir)
+    if entity_dir is None:
+        return {
+            "scan_status":"unavailable",
+            "entities_total":None,
+            "entity_types":{},
+            "entity_regions":0,
+            "note":"No modern entities/ region was available from this source input; entity loss cannot be quantified.",
+        }
+
+    counts=collections.Counter(); chunks=0; regions=0; failures=[]
+    for rp in sorted(entity_dir.glob("r.*.*.mca")):
+        if not rp.is_file() or rp.stat().st_size<8192:
+            continue
+        regions+=1
+        try:
+            for idx,raw in RegionReader(rp).chunks():
+                chunks+=1
+                try:
+                    _,root=parse_nbt(raw)
+                    entities=[]
+                    if isinstance(root,dict):
+                        entities=root.get("Entities",root.get("entities",[])) or []
+                    if not isinstance(entities,list):
+                        raise ConversionError("Entity chunk Entities tag is not a list")
+                    for ent in entities:
+                        if isinstance(ent,dict):
+                            counts[str(ent.get("id") or "<unknown>")]+=1
+                        else:
+                            counts["<malformed>"]+=1
+                except Exception as exc:
+                    if len(failures)<20:
+                        failures.append({"region":rp.name,"chunk_index":idx,"error":str(exc)})
+        except Exception as exc:
+            if len(failures)<20:
+                failures.append({"region":rp.name,"error":str(exc)})
+
+    if failures:
+        sample="; ".join(
+            "%s chunk %s: %s"%(x.get("region"),x.get("chunk_index","?"),x.get("error"))
+            for x in failures[:5]
+        )
+        raise ConversionError(
+            "Modern entity-region audit failed. No output world was created. Examples: %s"%sample
+        )
+
+    total=sum(counts.values())
+    log("Content audit: %d source entities across %d entity region file(s)."%(total,regions))
+    return {
+        "scan_status":"scanned",
+        "entities_total":total,
+        "entity_types":dict(counts),
+        "entity_regions":regions,
+        "entity_chunks":chunks,
+        "note":"Current 1.7.10 backend reports these entities but does not yet translate them.",
+    }
+
+
+def attach_content_audit(preflight: dict, source: Path, tempdir: Path, log=print):
+    entity_audit=audit_source_entities(source,tempdir,log)
+    content={
+        "policy":CONTENT_POLICY,
+        "block_entities_total":int(preflight.get("block_entities_total",0) or 0),
+        "block_entity_types":dict(preflight.get("block_entity_types") or {}),
+        "entity_scan_status":entity_audit.get("scan_status"),
+        "entities_total":entity_audit.get("entities_total"),
+        "entity_types":dict(entity_audit.get("entity_types") or {}),
+        "entity_regions":int(entity_audit.get("entity_regions",0) or 0),
+        "entity_chunks":int(entity_audit.get("entity_chunks",0) or 0),
+        "note":"Terrain/block states are converted; entities and block entities are currently reported in the loss manifest rather than translated.",
+    }
+    preflight["content_audit"]=content
+    if content["block_entities_total"]:
+        log(
+            "Content audit warning: %d block entity record(s) will be reported but not translated by this backend."
+            % content["block_entities_total"]
+        )
+    if content["entities_total"]:
+        log(
+            "Content audit warning: %d entity record(s) will be reported but not translated by this backend."
+            % content["entities_total"]
+        )
+    if content["entity_scan_status"]=="unavailable":
+        log("Content audit notice: source entity-region data was not available from this input form.")
+    return preflight
+
+
+def _prepare_staging_output(template: Path, output: Path):
+    """Clone the template beside the requested output without exposing partial results."""
     template=template.resolve(); output=output.resolve()
-    if template==output: raise ConversionError("Output must not be the template/source world")
+    if template==output:
+        raise ConversionError("Output must not be the template/source world")
     if output.exists():
-        if any(output.iterdir()): raise ConversionError("Output folder must not already contain files: %s"%output)
+        if not output.is_dir():
+            raise ConversionError("Output path already exists and is not a folder: %s"%output)
+        if any(output.iterdir()):
+            raise ConversionError("Output folder must not already contain files: %s"%output)
         output.rmdir()
-    shutil.copytree(template,output)
-    (output/"region").mkdir(parents=True,exist_ok=True)
+    output.parent.mkdir(parents=True,exist_ok=True)
+    staging=Path(tempfile.mkdtemp(prefix=".%s.wgmbps-staging-"%output.name,dir=str(output.parent)))
+    try:
+        shutil.copytree(template,staging,dirs_exist_ok=True)
+        (staging/"region").mkdir(parents=True,exist_ok=True)
+        return staging
+    except Exception:
+        shutil.rmtree(staging,ignore_errors=True)
+        raise
+
+
+def _promote_staging_output(staging: Path, output: Path):
+    staging=Path(staging); output=Path(output)
+    if output.exists():
+        raise ConversionError("Refusing to promote over an existing output path: %s"%output)
+    os.replace(str(staging),str(output))
 
 
 def _stable_hash(payload):
@@ -1298,10 +1567,22 @@ def _source_fingerprint(source: Path):
     for p in sorted(region_dir.glob("r.*.*.mca")):
         if not p.is_file(): continue
         st=p.stat()
-        files.append((p.name,st.st_size,st.st_mtime_ns))
+        files.append(("region",p.name,st.st_size,st.st_mtime_ns))
     if not files:
         raise ConversionError("Source directory contains no Anvil region files: %s" % source)
-    return _stable_hash({"kind":"region_dir","path":str(region_dir.resolve()),"files":files})
+
+    entity_dir=None
+    if (source/"entities").is_dir():
+        entity_dir=source/"entities"
+    elif source.name.lower()=="region" and (source.parent/"entities").is_dir():
+        entity_dir=source.parent/"entities"
+    if entity_dir is not None:
+        for p in sorted(entity_dir.glob("r.*.*.mca")):
+            if not p.is_file(): continue
+            st=p.stat()
+            files.append(("entities",p.name,st.st_size,st.st_mtime_ns))
+
+    return _stable_hash({"kind":"world_or_region_dir","path":str(region_dir.resolve()),"files":files})
 
 
 def _registry_fingerprint(reg: TargetRegistry):
@@ -1370,6 +1651,7 @@ def run_conversion_preflight(
         preflight=preflight_source_mappings(
             regions,reg,use_hbm,y_offset,log,mapping_profile=profile
         )
+        attach_content_audit(preflight,source,Path(td),log)
 
     fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y)
     result={
@@ -1392,13 +1674,16 @@ def run_conversion_preflight(
 
 
 def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_below_y=0, log=print, catalog_snapshot=None, verified_preflight=None):
-    if np is None: raise ConversionError("NumPy is required. Install it with: python3 -m pip install numpy")
-    if y_offset%16 != 0: raise ConversionError("Vertical offset must be a multiple of 16 (e.g. -32, -16, 0, 16)")
+    if np is None:
+        raise ConversionError("NumPy is required. Install it with: python3 -m pip install numpy")
+    if y_offset%16 != 0:
+        raise ConversionError("Vertical offset must be a multiple of 16 (e.g. -32, -16, 0, 16)")
+
     source=Path(source); template=Path(template); output=Path(output)
     profile=profile_from_catalog_snapshot(catalog_snapshot,bool(use_hbm))
 
-    # Fail closed before creating/cloning an output world. Forge 1.7.10 registry
-    # parsing and the exact mapping profile must be proven usable first.
+    # Fail closed before creating even a staging clone. The target registry,
+    # mapping profile and source palette mapping must all be known-good first.
     reg=load_target_registry(template)
     registry_info=validate_target_registry(reg,use_hbm,log,mapping_profile=profile)
     current_fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y)
@@ -1411,14 +1696,28 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             "vertical_offset":y_offset,
             "strip_below_y":strip_below_y,
         },
+        "content_policy":CONTENT_POLICY,
+        "lighting_strategy":LIGHTING_STRATEGY,
+        "heightmap_strategy":HEIGHTMAP_STRATEGY,
+        "block_property_strategy":BLOCK_PROPERTY_STRATEGY,
+        "target_relight_required":True,
         "mapping_profile":profile.to_dict(),
         "target_registry":registry_info,"preflight":{},
         "preflight_reused":False,
-        "regions_total":0,"regions_converted":0,"chunks_converted":0,"chunks_failed":0,
+        "output_promoted":False,
+        "regions_total":0,"regions_converted":0,"regions_verified":0,
+        "chunks_converted":0,"chunks_verified":0,"chunks_failed":0,
         "chunks_cropped_above_255":0,"chunks_cropped_below_0":0,
+        "block_entities_omitted":0,
+        "block_entity_types_omitted":collections.Counter(),
+        "entities_omitted":None,
+        "entity_types_omitted":{},
+        "entity_scan_status":"unknown",
         "data_versions":collections.Counter(),"palette_seen":collections.Counter(),
         "mapping_quality":collections.defaultdict(set),"mapping_notes":{},
-        "failure_counts":collections.Counter(),"failures":[]
+        "failure_counts":collections.Counter(),"failures":[],
+        "failure_report_json":"",
+        "failure_report_txt":"",
     }
     max_failure_examples=200
 
@@ -1428,96 +1727,179 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
         if len(report["failures"])<max_failure_examples:
             report["failures"].append(entry)
 
-    with tempfile.TemporaryDirectory(prefix="wg1710_") as td:
-        src_regions=discover_source_regions(source,Path(td))
-        regions=[p for p in sorted(src_regions.glob("r.*.*.mca")) if p.stat().st_size>=8192]
-        report["regions_total"]=len(regions)
-        if not regions:
-            raise ConversionError("Source contains no non-empty Anvil region files")
-        log("Found %d non-empty region files"%len(regions))
-        reusable=(
-            isinstance(verified_preflight,dict)
-            and bool(verified_preflight.get("ready"))
-            and verified_preflight.get("fingerprint") == current_fingerprint
-            and isinstance(verified_preflight.get("preflight"),dict)
-        )
-        if reusable:
-            report["preflight"]=dict(verified_preflight["preflight"])
-            report["preflight_reused"]=True
-            log("Reusing the verified read-only preflight; source, template, settings and active catalogs are unchanged.")
-        else:
-            if verified_preflight:
-                log("Stored preflight no longer matches the current conversion inputs; running it again before output creation.")
-            else:
-                log("Running source/target mapping preflight before creating the output world...")
-            report["preflight"]=preflight_source_mappings(
-                regions,reg,use_hbm,y_offset,log,mapping_profile=profile
+    def serialise_report():
+        serial=dict(report)
+        serial["data_versions"]=dict(report["data_versions"])
+        serial["palette_seen"]=dict(report["palette_seen"])
+        serial["mapping_quality"]={k:sorted(v) for k,v in report["mapping_quality"].items()}
+        serial["failure_counts"]=dict(report["failure_counts"])
+        serial["block_entity_types_omitted"]=dict(report["block_entity_types_omitted"])
+        return serial
+
+    def report_lines(serial):
+        profile_dict=profile.to_dict()
+        profile_mods=", ".join(profile_dict.get("enabled_mod_ids") or []) or "none"
+        content=(serial.get("preflight") or {}).get("content_audit") or {}
+        source_entities=content.get("entities_total")
+        entity_text="not scanned from this input form" if source_entities is None else str(source_entities)
+        lines=[
+            "WG Modern -> 1.7.10 Backport Report", "====================================", "",
+            "Output status: %s"%("PROMOTED" if serial.get("output_promoted") else "NOT PROMOTED"),
+            "Target registry: %s"%reg.summary(),
+            "Mapping profile: %s"%profile_dict.get("mode","unknown"),
+            "Enabled catalog mod namespaces: %s"%profile_mods,
+            "Verified preflight reused: %s"%("yes" if serial.get("preflight_reused") else "no"),
+            "Preflight chunks: %d"%(serial.get("preflight") or {}).get("chunks",0),
+            "Preflight unique in-range palette states: %d"%(serial.get("preflight") or {}).get("unique_palette_states",0),
+            "Potential crop above Y=255: %d chunk(s)"%(serial.get("preflight") or {}).get("potential_chunks_cropped_above_255",0),
+            "Potential crop below Y=0: %d chunk(s)"%(serial.get("preflight") or {}).get("potential_chunks_cropped_below_0",0), "",
+            "Content policy: %s"%CONTENT_POLICY,
+            "Source block entities detected: %d"%int(content.get("block_entities_total",0) or 0),
+            "Block entities translated: 0",
+            "Block entities omitted/reported during conversion: %d"%int(serial.get("block_entities_omitted",0) or 0),
+            "Source entities detected: %s"%entity_text,
+            "Entities translated: 0",
+            "Block-property strategy: %s"%BLOCK_PROPERTY_STRATEGY,
+            "Lighting strategy: %s (legacy chunks emitted with LightPopulated=0)"%LIGHTING_STRATEGY,
+            "Heightmap strategy: %s"%HEIGHTMAP_STRATEGY, "",
+            "Converted regions: %d / %d"%(serial.get("regions_converted",0),serial.get("regions_total",0)),
+            "Round-trip verified regions: %d"%serial.get("regions_verified",0),
+            "Converted chunks: %d"%serial.get("chunks_converted",0),
+            "Round-trip verified chunks: %d"%serial.get("chunks_verified",0),
+            "Failed chunks: %d"%serial.get("chunks_failed",0),
+            "Chunks with source blocks cropped above Y=255: %d"%serial.get("chunks_cropped_above_255",0),
+            "Chunks with source blocks cropped below Y=0: %d"%serial.get("chunks_cropped_below_0",0), "",
+            "Approximate/omitted modern blocks:",
+        ]
+        for name in sorted(report["mapping_notes"]):
+            e=report["mapping_notes"][name]
+            lines.append("- %s -> %s:%d [%s]%s"%(
+                name,e["target"],e["meta"],e["quality"],(" — "+e["note"]) if e["note"] else ""
+            ))
+        if report["block_entity_types_omitted"]:
+            lines += ["", "Block-entity loss manifest:"]
+            for be,count in report["block_entity_types_omitted"].most_common():
+                lines.append("- %d × %s"%(count,be))
+        if source_entities is not None and content.get("entity_types"):
+            lines += ["", "Entity loss manifest (preflight audit):"]
+            for ent,count in sorted(content.get("entity_types",{}).items(),key=lambda kv:(-kv[1],kv[0])):
+                lines.append("- %d × %s"%(count,ent))
+        if report["failure_counts"]:
+            lines += ["", "Failure summary:"]
+            for error,count in report["failure_counts"].most_common():
+                lines.append("- %d × %s"%(count,error))
+        if report["failures"]:
+            lines += ["", "Failure examples (maximum %d):"%max_failure_examples]
+            lines += ["- "+json.dumps(x,sort_keys=True) for x in report["failures"]]
+        return lines
+
+    def write_reports(directory: Path, json_name="WG_BACKPORT_REPORT.json", txt_name="WG_BACKPORT_REPORT.txt"):
+        directory=Path(directory); directory.mkdir(parents=True,exist_ok=True)
+        serial=serialise_report()
+        (directory/json_name).write_text(json.dumps(serial,indent=2,sort_keys=True),encoding="utf-8")
+        (directory/txt_name).write_text("\n".join(report_lines(serial))+"\n",encoding="utf-8")
+        return serial,directory/json_name,directory/txt_name
+
+    staging=None
+    try:
+        with tempfile.TemporaryDirectory(prefix="wg1710_") as td:
+            td=Path(td)
+            src_regions=discover_source_regions(source,td)
+            regions=[p for p in sorted(src_regions.glob("r.*.*.mca")) if p.stat().st_size>=8192]
+            report["regions_total"]=len(regions)
+            if not regions:
+                raise ConversionError("Source contains no non-empty Anvil region files")
+            log("Found %d non-empty region files"%len(regions))
+
+            reusable=(
+                isinstance(verified_preflight,dict)
+                and bool(verified_preflight.get("ready"))
+                and verified_preflight.get("fingerprint") == current_fingerprint
+                and isinstance(verified_preflight.get("preflight"),dict)
             )
+            if reusable:
+                report["preflight"]=dict(verified_preflight["preflight"])
+                report["preflight_reused"]=True
+                log("Reusing the verified read-only preflight; source, template, settings and active catalogs are unchanged.")
+            else:
+                if verified_preflight:
+                    log("Stored preflight no longer matches the current conversion inputs; running it again before output staging.")
+                else:
+                    log("Running source/target mapping preflight before output staging...")
+                report["preflight"]=preflight_source_mappings(
+                    regions,reg,use_hbm,y_offset,log,mapping_profile=profile
+                )
+                attach_content_audit(report["preflight"],source,td,log)
 
-        # Only now is it safe to clone the target template. Any catastrophic
-        # registry/mapping mismatch above leaves the requested output untouched.
-        ensure_output(template,output)
-        log("Preflight is green; cloned the template world and starting conversion.")
+            content=(report["preflight"] or {}).get("content_audit") or {}
+            report["entities_omitted"]=content.get("entities_total")
+            report["entity_types_omitted"]=dict(content.get("entity_types") or {})
+            report["entity_scan_status"]=str(content.get("entity_scan_status") or "unavailable")
 
-        for ri,rp in enumerate(regions,1):
-            chunks={}
-            log("[%d/%d] %s"%(ri,len(regions),rp.name))
-            try:
-                for idx,raw in RegionReader(rp).chunks():
-                    try:
-                        (cx,cz),legacy=convert_chunk(raw,reg,use_hbm,y_offset,strip_below_y,report,mapping_profile=profile)
-                        local=(cx&31)+((cz&31)*32)
-                        chunks[local]=legacy; report["chunks_converted"]+=1
-                    except Exception as e:
-                        report["chunks_failed"]+=1
-                        record_failure({"region":rp.name,"chunk_index":idx,"error":str(e)})
-                        if report["chunks_failed"]<=20: log("  chunk %d FAILED: %s"%(idx,e))
-                if chunks:
-                    write_region(output/"region"/rp.name,chunks)
-                    report["regions_converted"]+=1
-            except Exception as e:
-                record_failure({"region":rp.name,"error":str(e)})
-                log("  REGION FAILED: %s"%e)
+            # Conversion writes only into a hidden sibling staging world. The
+            # requested output path is promoted only after zero chunk failures
+            # and a full region round-trip structural verification.
+            staging=_prepare_staging_output(template,output)
+            log("Preflight is green; created a hidden staging clone and starting conversion.")
 
-    # JSON-serializable summary. Keep failure examples bounded and aggregate
-    # repeated errors so a bad chunk pattern cannot create a multi-megabyte report.
-    serial=dict(report)
-    serial["data_versions"]=dict(report["data_versions"])
-    serial["palette_seen"]=dict(report["palette_seen"])
-    serial["mapping_quality"]={k:sorted(v) for k,v in report["mapping_quality"].items()}
-    serial["failure_counts"]=dict(report["failure_counts"])
-    (output/"WG_BACKPORT_REPORT.json").write_text(json.dumps(serial,indent=2,sort_keys=True),encoding="utf-8")
-    profile_dict=profile.to_dict()
-    profile_mods=", ".join(profile_dict.get("enabled_mod_ids") or []) or "none"
-    lines=[
-        "WG Modern -> 1.7.10 Backport Report", "====================================", "",
-        "Target registry: %s"%reg.summary(),
-        "Mapping profile: %s"%profile_dict.get("mode","unknown"),
-        "Enabled catalog mod namespaces: %s"%profile_mods,
-        "Verified preflight reused: %s"%("yes" if report.get("preflight_reused") else "no"),
-        "Preflight chunks: %d"%report["preflight"].get("chunks",0),
-        "Preflight unique in-range palette states: %d"%report["preflight"].get("unique_palette_states",0),
-        "Potential crop above Y=255: %d chunk(s)"%report["preflight"].get("potential_chunks_cropped_above_255",0),
-        "Potential crop below Y=0: %d chunk(s)"%report["preflight"].get("potential_chunks_cropped_below_0",0), "",
-        "Converted regions: %d / %d"%(report["regions_converted"],report["regions_total"]),
-        "Converted chunks: %d"%report["chunks_converted"], "Failed chunks: %d"%report["chunks_failed"],
-        "Chunks with source blocks cropped above Y=255: %d"%report["chunks_cropped_above_255"],
-        "Chunks with source blocks cropped below Y=0: %d"%report["chunks_cropped_below_0"], "",
-        "Approximate/omitted modern blocks:",
-    ]
-    for name in sorted(report["mapping_notes"]):
-        e=report["mapping_notes"][name]
-        lines.append("- %s -> %s:%d [%s]%s"%(name,e["target"],e["meta"],e["quality"],(" — "+e["note"]) if e["note"] else ""))
-    if report["failure_counts"]:
-        lines += ["", "Failure summary:"]
-        for error,count in report["failure_counts"].most_common():
-            lines.append("- %d × %s"%(count,error))
-    if report["failures"]:
-        lines += ["", "Failure examples (maximum %d):"%max_failure_examples]+["- "+json.dumps(x,sort_keys=True) for x in report["failures"]]
-    (output/"WG_BACKPORT_REPORT.txt").write_text("\n".join(lines)+"\n",encoding="utf-8")
-    log("Finished: %d chunks, %d failures"%(report["chunks_converted"],report["chunks_failed"]))
-    log("Report: %s"%(output/"WG_BACKPORT_REPORT.txt"))
-    return serial
+            for ri,rp in enumerate(regions,1):
+                chunks={}
+                log("[%d/%d] %s"%(ri,len(regions),rp.name))
+                try:
+                    for idx,raw in RegionReader(rp).chunks():
+                        try:
+                            (cx,cz),legacy=convert_chunk(
+                                raw,reg,use_hbm,y_offset,strip_below_y,report,mapping_profile=profile
+                            )
+                            local=(cx&31)+((cz&31)*32)
+                            chunks[local]=legacy
+                            report["chunks_converted"]+=1
+                        except Exception as exc:
+                            report["chunks_failed"]+=1
+                            record_failure({"region":rp.name,"chunk_index":idx,"error":str(exc)})
+                            if report["chunks_failed"]<=20:
+                                log("  chunk %d FAILED: %s"%(idx,exc))
+                    if chunks:
+                        out_region=staging/"region"/rp.name
+                        write_region(out_region,chunks)
+                        verified=verify_written_region(out_region,chunks.keys())
+                        report["regions_converted"]+=1
+                        report["regions_verified"]+=1
+                        report["chunks_verified"]+=verified
+                except Exception as exc:
+                    # Region-level writer/verification problems make the staged
+                    # world non-promotable even if individual chunk conversion
+                    # happened to succeed.
+                    record_failure({"region":rp.name,"error":str(exc)})
+                    report["chunks_failed"]+=max(1,len(chunks))
+                    log("  REGION FAILED/UNVERIFIED: %s"%exc)
+
+            if report["chunks_failed"] or report["regions_verified"] != report["regions_converted"] or report["chunks_verified"] != report["chunks_converted"]:
+                report["output_promoted"]=False
+                fail_json=output.parent/(output.name+".WG_BACKPORT_FAILED_REPORT.json")
+                fail_txt=output.parent/(output.name+".WG_BACKPORT_FAILED_REPORT.txt")
+                report["failure_report_json"]=str(fail_json)
+                report["failure_report_txt"]=str(fail_txt)
+                serial=serialise_report()
+                fail_json.write_text(json.dumps(serial,indent=2,sort_keys=True),encoding="utf-8")
+                fail_txt.write_text("\n".join(report_lines(serial))+"\n",encoding="utf-8")
+                shutil.rmtree(staging,ignore_errors=True)
+                staging=None
+                log("Conversion was NOT promoted: the requested output world remains absent.")
+                log("Failure report: %s"%fail_txt)
+                return serial
+
+            report["output_promoted"]=True
+            serial,_,_=write_reports(staging)
+            _promote_staging_output(staging,output)
+            staging=None
+            log("Staged world passed round-trip verification and was promoted to: %s"%output)
+            log("Finished: %d chunks, 0 failures"%report["chunks_converted"])
+            log("Report: %s"%(output/"WG_BACKPORT_REPORT.txt"))
+            return serial
+    finally:
+        if staging is not None and Path(staging).exists():
+            shutil.rmtree(staging,ignore_errors=True)
 
 
 # ---------- Map analyzer used without a target world ----------
