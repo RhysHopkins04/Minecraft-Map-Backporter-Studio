@@ -46,10 +46,10 @@ AIR_NAMES = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
 # converted, while modern entities and block entities are audited and reported
 # instead of being silently discarded. Legacy output chunks are emitted with
 # LightPopulated=0 so the target 1.7.10 runtime can perform its own relight pass.
-CONTENT_POLICY = "terrain_blocks_with_loss_manifest"
+CONTENT_POLICY = "terrain_blocks_with_loss_manifest_and_efr_state_tile_entities"
 LIGHTING_STRATEGY = "target_runtime_relight"
 HEIGHTMAP_STRATEGY = "bootstrap_highest_non_air"
-BLOCK_PROPERTY_STRATEGY = "source_properties_to_legacy_metadata_plus_runtime_neighbors"
+BLOCK_PROPERTY_STRATEGY = "source_properties_to_legacy_metadata_plus_efr_state_tile_entities_plus_runtime_neighbors"
 
 # Minecraft dye/block metadata ordering in legacy 1.7.10.
 COLOR_META = {
@@ -645,6 +645,15 @@ def validate_target_registry(
 
 def boolprop(props,k): return str(props.get(k,"false")).lower()=="true"
 
+def intprop(props,k,default=0,minimum=None,maximum=None):
+    try:
+        value=int(props.get(k,default))
+    except Exception:
+        value=int(default)
+    if minimum is not None: value=max(int(minimum),value)
+    if maximum is not None: value=min(int(maximum),value)
+    return value
+
 def stair_meta(props):
     facing={"east":0,"west":1,"south":2,"north":3}.get(props.get("facing"),0)
     if props.get("half") == "top": facing |= 4
@@ -659,6 +668,59 @@ def log_axis_bits(props, wood_block=False):
 
 def sign_wall_meta(props): return {"north":2,"south":3,"west":4,"east":5}.get(props.get("facing"),2)
 def torch_wall_meta(props): return {"east":1,"west":2,"south":3,"north":4}.get(props.get("facing"),5)
+
+def direction_meta(props,key="facing",default="up"):
+    """ForgeDirection/vanilla side ordinal: down/up/north/south/west/east."""
+    return {"down":0,"up":1,"north":2,"south":3,"west":4,"east":5}.get(
+        str(props.get(key,default)).lower(),
+        {"down":0,"up":1,"north":2,"south":3,"west":4,"east":5}.get(default,1),
+    )
+
+def chain_axis_meta(props):
+    """EFR BlockChain metadata: Y=0, X=1, Z=2."""
+    return {"y":0,"x":1,"z":2}.get(str(props.get("axis","y")).lower(),0)
+
+def loom_meta(props):
+    """EFR BlockLoom stores the front as sideOrdinal-2."""
+    return {"north":0,"south":1,"west":2,"east":3}.get(str(props.get("facing","north")).lower(),0)
+
+def beetroot_meta(props):
+    """Modern beetroot age 0..3 -> EFR/1.7 BlockCrops growth metadata 0..7."""
+    return (0,2,4,7)[intprop(props,"age",0,0,3)]
+
+def segmented_ground_meta(props,amount_key):
+    amount=intprop(props,amount_key,1,1,4)
+    return ((amount-1)<<2) | _horizontal_quadrant(props)
+
+def pink_petals_meta(props):
+    # EFR's mature BlockPinkPetals predates the parity bridge. Low two bits are
+    # amount-1; high two bits are its renderer rotation. Derive the rotation from
+    # vanilla FlowerBedBlock placement (block faces back toward the placer).
+    amount=intprop(props,"flower_amount",1,1,4)
+    rotation={"north":0,"east":1,"south":3,"west":2}.get(str(props.get("facing","north")).lower(),0)
+    return (rotation<<2) | (amount-1)
+
+def grindstone_meta(props):
+    face={"floor":0,"wall":1,"ceiling":2}.get(str(props.get("face","floor")).lower(),0)
+    return face*4 + _horizontal_quadrant(props)
+
+def _only_default_runtime_props(props, defaults=None, ignored=()):
+    """Whether every source property outside represented state is a known default.
+
+    This keeps `backport_exact` conservative. Runtime-only neighbor properties can
+    be explicitly ignored by a caller; waterlogged state is never silently called
+    exact unless it is false/default.
+    """
+    defaults={str(k):str(v).lower() for k,v in (defaults or {}).items()}
+    ignored={str(x) for x in ignored}
+    for key,value in (props or {}).items():
+        key=str(key)
+        if key in ignored or key in defaults:
+            if key in defaults and str(value).lower()!=defaults[key]:
+                return False
+            continue
+        return False
+    return True
 def gate_meta(props):
     m={"south":0,"west":1,"north":2,"east":3}.get(props.get("facing"),0)
     if boolprop(props,"open"): m|=4
@@ -748,6 +810,15 @@ def _horizontal_quadrant(props):
     return {"north": 0, "east": 1, "south": 2, "west": 3}.get(str(props.get("facing", "north")).lower(), 0)
 
 
+def _glow_lichen_state_mask(props):
+    """EFR TileEntityGlowLichen six-face bitmap (ForgeDirection ordinal bits)."""
+    mask=0
+    for direction,bit in (("down",0),("up",1),("north",2),("south",3),("west",4),("east",5)):
+        if boolprop(props,direction):
+            mask |= 1 << bit
+    return mask
+
+
 def _etfuturum_state_meta(path, props):
     """Metadata translator for direct EFR/modern identity matches.
 
@@ -756,6 +827,20 @@ def _etfuturum_state_meta(path, props):
     fork exposes explicitly, then fall back to the generic provider translator.
     """
     p=path.lower()
+    if p.endswith("_pressure_plate"):
+        return (1 if boolprop(props,"powered") else 0), _only_default_runtime_props(
+            props,ignored={"powered"}
+        )
+    if p == "barrier":
+        return 0, _only_default_runtime_props(props,{"waterlogged":"false"})
+    if (p.endswith("_fence") and not p.endswith("_fence_gate")) or p.endswith("_pane") or p.endswith("_bars"):
+        # EFR's 1.7 runtime/model bridge recomputes cardinal connections from
+        # neighboring blocks, so the modern connection booleans need no packed
+        # metadata. Keep this EFR-specific instead of assuming every provider
+        # implements the same runtime contract.
+        return 0, _only_default_runtime_props(
+            props,{"waterlogged":"false"},ignored={"north","east","south","west"}
+        )
     if p.endswith("_wall_hanging_sign"):
         return sign_wall_meta(props), True
     if p.endswith("_bed"):
@@ -772,6 +857,111 @@ def _etfuturum_state_meta(path, props):
         return (count-1) | (4 if boolprop(props,"lit") else 0), True
     if p == "candle_cake" or p.endswith("_candle_cake"):
         return 1 if boolprop(props,"lit") else 0, True
+    if p == "wildflowers":
+        return segmented_ground_meta(props,"flower_amount"), _only_default_runtime_props(
+            props, {"waterlogged":"false"}, ignored={"facing","flower_amount"}
+        )
+    if p == "leaf_litter":
+        return segmented_ground_meta(props,"segment_amount"), _only_default_runtime_props(
+            props, {"waterlogged":"false"}, ignored={"facing","segment_amount"}
+        )
+    if p == "pink_petals":
+        return pink_petals_meta(props), _only_default_runtime_props(
+            props,{"waterlogged":"false"},ignored={"facing","flower_amount"}
+        )
+    if p.endswith("_shelf"):
+        # EFR Plus' parity shelf model consumes only the low two facing bits.
+        # Modern powered/side-chain state has no 1.7.10 equivalent yet.
+        exact=_only_default_runtime_props(
+            props,
+            {"powered":"false","side_chain":"unconnected","waterlogged":"false"},
+            ignored={"facing"},
+        )
+        return _horizontal_quadrant(props), exact
+    if p == "end_rod":
+        return direction_meta(props), _only_default_runtime_props(props, ignored={"facing"})
+    if p == "deepslate":
+        return log_axis_bits(props), _only_default_runtime_props(props, ignored={"axis"})
+    if p == "muddy_mangrove_roots":
+        return log_axis_bits(props), _only_default_runtime_props(props, ignored={"axis"})
+    if p == "sweet_berry_bush":
+        return intprop(props,"age",0,0,3), _only_default_runtime_props(props, ignored={"age"})
+    if p == "beetroots":
+        return beetroot_meta(props), _only_default_runtime_props(props, ignored={"age"})
+    if p == "composter":
+        return intprop(props,"level",0,0,8), _only_default_runtime_props(props, ignored={"level"})
+    if p == "light":
+        return intprop(props,"level",0,0,15), _only_default_runtime_props(
+            props,{"waterlogged":"false"},ignored={"level"}
+        )
+    if p in {"lantern","soul_lantern"}:
+        return (1 if boolprop(props,"hanging") else 0), _only_default_runtime_props(
+            props,{"waterlogged":"false"},ignored={"hanging"}
+        )
+    if p == "barrel":
+        return direction_meta(props), _only_default_runtime_props(
+            props,{"open":"false"},ignored={"facing"}
+        )
+    if p in {"beehive","bee_nest"}:
+        facing=direction_meta(props,"facing","north")
+        honey=intprop(props,"honey_level",0,0,5)
+        meta=facing + (6 if honey == 5 else 0)
+        # EFR only has an alternate metadata face for the full-honey state. Its
+        # TileEntity honeyLevel is synthesized by the writer below for all 0..5.
+        exact=_only_default_runtime_props(props,ignored={"facing","honey_level"})
+        return meta, exact
+    if p in {"blast_furnace","smoker"}:
+        # Facing uses the classic furnace side ordinal. Lit identity is handled
+        # by _map_etfuturum_first when a registered lit_* block exists.
+        exact=_only_default_runtime_props(props,{"lit":"false"},ignored={"facing"})
+        return direction_meta(props,"facing","north"), exact
+    if p == "loom":
+        return loom_meta(props), _only_default_runtime_props(props,ignored={"facing"})
+    if p.endswith("lightning_rod"):
+        return direction_meta(props), _only_default_runtime_props(
+            props,{"powered":"false","waterlogged":"false"},ignored={"facing"}
+        )
+    if p == "chain":
+        return chain_axis_meta(props), _only_default_runtime_props(
+            props,{"waterlogged":"false"},ignored={"axis"}
+        )
+    if p == "grindstone":
+        return grindstone_meta(props), _only_default_runtime_props(props,ignored={"face","facing"})
+    if p == "scaffolding":
+        distance=intprop(props,"distance",0,0,7)
+        meta=distance | (8 if boolprop(props,"bottom") else 0)
+        return meta, _only_default_runtime_props(
+            props,{"waterlogged":"false"},ignored={"distance","bottom"}
+        )
+    if p == "turtle_egg":
+        eggs=intprop(props,"eggs",1,1,4)
+        hatch=intprop(props,"hatch",0,0,2)
+        return (hatch<<2)|(eggs-1), _only_default_runtime_props(props,ignored={"eggs","hatch"})
+    if p.endswith("_coral_wall_fan"):
+        return sign_wall_meta(props), _only_default_runtime_props(
+            props,{"waterlogged":"false"},ignored={"facing"}
+        )
+    if p == "glow_lichen":
+        mask=_glow_lichen_state_mask(props)
+        exact=bool(mask) and _only_default_runtime_props(
+            props,{"waterlogged":"false"},ignored={"down","up","north","south","west","east"}
+        )
+        # The six faces do not fit in metadata; the writer synthesizes the EFR
+        # TileEntityGlowLichen State bitmap. Metadata itself is intentionally 0.
+        return 0, exact
+    if p.endswith("_copper_chain"):
+        # Preserve the free metadata bits now even though the attached EFR Plus
+        # parity renderer does not yet consume them. A later EFR renderer fix can
+        # therefore recover orientation without reconverting the world.
+        return chain_axis_meta(props), False
+    if p.endswith("_copper_lantern"):
+        return (1 if boolprop(props,"hanging") else 0), False
+    if p.endswith("_froglight"):
+        return log_axis_bits(props), False
+    if p.endswith("copper_chest"):
+        return direction_meta(props,"facing","north"), _only_default_runtime_props(
+            props,{"waterlogged":"false"},ignored={"facing","type"}
+        )
     if p == "copper_bulb":
         meta=ET_FUTURUM_COPPER_BULB_BASE_META[p]
         if boolprop(props,"lit"): meta|=4
@@ -870,6 +1060,12 @@ def _etfuturum_alias(path, props):
     if p == "stripped_bamboo_block":
         return "bamboo_block",1|log_axis_bits(props),True,"EFR packed stripped bamboo block"
 
+    # 1.21.9 renamed the vanilla chain identity to iron_chain. EFR's established
+    # 1.7.10 implementation remains registered as `chain` and uses axis metadata.
+    if p == "iron_chain":
+        exact=_only_default_runtime_props(props,{"waterlogged":"false"},ignored={"axis"})
+        return "chain",chain_axis_meta(props),exact,"EFR chain axis metadata (modern iron_chain alias)"
+
     if p in ET_FUTURUM_COPPER_BLOCK_META:
         return "copper_block",ET_FUTURUM_COPPER_BLOCK_META[p],True,"EFR packed copper/cut-copper state"
     if p in ET_FUTURUM_CHISELED_COPPER_META:
@@ -903,11 +1099,25 @@ def _map_etfuturum_first(name, props, reg: TargetRegistry):
     if reg.resolve("minecraft:"+p) is not None:
         return None
 
+    # Furnace-like EFR blocks retain separate lit/unlit 1.7.10 registry IDs.
+    # Prefer the lit identity when the modern state says lit and the selected
+    # target registry actually contains that concrete block.
+    if p in {"blast_furnace","smoker"} and boolprop(props or {},"lit"):
+        lit_direct=_etfuturum_registry_name("lit_"+p)
+        if reg.resolve(lit_direct) is not None:
+            meta=direction_meta(props or {},"facing","north")
+            exact=_only_default_runtime_props(props or {},ignored={"facing","lit"})
+            quality="backport_exact" if exact else "backport_close"
+            note="Et Futurum lit furnace identity detected directly in the selected target registry (Forge 1.7.10)"
+            if not exact:
+                note += "; exact block identity but some source state is not represented"
+            return Mapping(lit_direct,meta&15,quality,note)
+
     direct=_etfuturum_registry_name(p)
     if reg.resolve(direct) is not None:
         meta,state_exact=_etfuturum_state_meta(p,props or {})
         quality="backport_exact" if state_exact else "backport_close"
-        note="Et Futurum target detected directly in the selected Forge registry"
+        note="Et Futurum target detected directly in the selected target registry (Forge 1.7.10)"
         if not state_exact:
             note += "; exact block identity but state metadata is only partially translatable"
         return Mapping(direct,meta&15,quality,note)
@@ -1386,6 +1596,7 @@ def preflight_source_mappings(
     mapping_cache={}; mapping_impact=collections.Counter(); quality_occurrences=collections.Counter()
     unavailable_provider_impact=collections.Counter()
     source_occurrences=collections.Counter(); block_occurrences_total=0
+    stateful_occurrences_total=0; stateful_preserved_occurrences=0
     crop_high_chunks=0; crop_low_chunks=0
     block_entity_types=collections.Counter()
     property_states=0; property_keys=collections.Counter()
@@ -1449,6 +1660,10 @@ def preflight_source_mappings(
                                     block_occurrences_total+=count
                                     source_occurrences[str(name)]+=count
                                     quality_occurrences[mapping.quality]+=count
+                                    if props:
+                                        stateful_occurrences_total+=count
+                                        if mapping.quality in {"exact","backport_exact"}:
+                                            stateful_preserved_occurrences+=count
                                     mapping_impact[(str(name),str(resolved),str(mapping.quality),str(mapping.note or ""))]+=count
                                     if mapping_profile is not None and mapping_profile.allow_safe_mod_replacements and mapping.quality not in {"backport_exact","backport_close"}:
                                         source_name=str(name)
@@ -1532,6 +1747,12 @@ def preflight_source_mappings(
         "unique_palette_states_with_properties":property_states,
         "property_keys_seen":dict(property_keys),
         "block_occurrences_total":int(block_occurrences_total),
+        "stateful_block_occurrences_total":int(stateful_occurrences_total),
+        "stateful_block_occurrences_preserved":int(stateful_preserved_occurrences),
+        "stateful_block_occurrences_partial":int(max(0,stateful_occurrences_total-stateful_preserved_occurrences)),
+        "stateful_block_fidelity_percent":(
+            100.0*stateful_preserved_occurrences/stateful_occurrences_total if stateful_occurrences_total else 100.0
+        ),
         "mapping_quality_block_occurrences":dict(quality_occurrences),
         "mapping_quality_percent":quality_percent,
         "top_non_exact_mappings":impact_rows,
@@ -1562,6 +1783,11 @@ def preflight_source_mappings(
                 parts.append("%s %.2f%%"%(quality,quality_percent.get(quality,0.0)))
         if parts:
             log("Preflight mapping impact by placed blocks: "+"; ".join(parts))
+        if stateful_occurrences_total:
+            log(
+                "Preflight state fidelity: %.2f%% of placed stateful blocks have a verified legacy/EFR state encoding (%d/%d)."
+                % (100.0*stateful_preserved_occurrences/stateful_occurrences_total,stateful_preserved_occurrences,stateful_occurrences_total)
+            )
         if impact_rows:
             sample=", ".join("%s -> %s (%s, %d)"%(row["source"],row["target"],row["quality"],row["count"]) for row in impact_rows[:8])
             log("Highest-impact non-exact mappings: "+sample)
@@ -1580,12 +1806,73 @@ def nbt_name(name):
 def tag(t,name,payload): return bytes([t])+nbt_name(name)+payload
 
 def p_byte(v): return struct.pack(">b", ((int(v)+128)%256)-128)
+def p_short(v): return struct.pack(">h", ((int(v)+32768)%65536)-32768)
 def p_int(v): return struct.pack(">i",int(v))
 def p_long(v): return struct.pack(">q",int(v))
+def p_string(v):
+    b=str(v).encode("utf-8")
+    return struct.pack(">H",len(b))+b
 def p_byte_array(b): return struct.pack(">i",len(b))+bytes(b)
 def p_int_array(vals): return struct.pack(">i",len(vals))+b"".join(struct.pack(">i",int(v)) for v in vals)
 def p_list(et,payloads): return bytes([et])+struct.pack(">i",len(payloads))+b"".join(payloads)
 def p_compound(named_tags): return b"".join(named_tags)+b"\x00"
+
+
+def _legacy_tile_entity_base(te_id,x,y,z,extra_tags=()):
+    return p_compound([
+        tag(8,"id",p_string(te_id)),
+        tag(3,"x",p_int(x)), tag(3,"y",p_int(y)), tag(3,"z",p_int(z)),
+        *list(extra_tags),
+    ])
+
+
+def _etfuturum_state_tile_entity(target_name, _source_path, props, x, y, z):
+    """Build minimal EFR TEs required for imported blockstate fidelity.
+
+    These are intentionally *state* tile entities, not a claim that arbitrary
+    modern inventories/entities have been translated. Source block entities are
+    still audited and reported separately. The generated compounds are limited
+    to EFR contracts verified in the attached 1.7.10 source.
+    """
+    target=str(target_name).lower()
+    if target == "etfuturum:glow_lichen":
+        mask=_glow_lichen_state_mask(props or {})
+        if not mask:
+            return None
+        return _legacy_tile_entity_base(
+            "etfuturum.glow_lichen",x,y,z,[tag(3,"State",p_int(mask))]
+        )
+    if target in {"etfuturum:beehive","etfuturum:bee_nest"}:
+        honey=intprop(props or {},"honey_level",0,0,5)
+        extra=[tag(9,"Bees",p_list(10,[]))]
+        if honey:
+            extra.append(tag(3,"honeyLevel",p_int(honey)))
+        return _legacy_tile_entity_base("etfuturum.hive",x,y,z,extra)
+    if target == "etfuturum:barrel":
+        return _legacy_tile_entity_base(
+            "etfuturum.barrel",x,y,z,[tag(1,"Type",p_byte(0)),tag(9,"Items",p_list(10,[]))]
+        )
+    if target in {"etfuturum:blast_furnace","etfuturum:lit_blast_furnace"}:
+        return _legacy_tile_entity_base(
+            "etfuturum.blast_furnace",x,y,z,[
+                tag(2,"BurnTime",p_short(0)),tag(2,"CookTime",p_short(0)),tag(9,"Items",p_list(10,[])),
+            ]
+        )
+    if target in {"etfuturum:smoker","etfuturum:lit_smoker"}:
+        return _legacy_tile_entity_base(
+            "etfuturum.smoker",x,y,z,[
+                tag(2,"BurnTime",p_short(0)),tag(2,"CookTime",p_short(0)),tag(9,"Items",p_list(10,[])),
+            ]
+        )
+    if target in {"etfuturum:campfire","etfuturum:soul_campfire"}:
+        return _legacy_tile_entity_base(
+            "etfuturum:modern_parity_campfire",x,y,z,[tag(9,"CookingItems",p_list(10,[]))]
+        )
+    if target.startswith("etfuturum:") and target.endswith("copper_chest"):
+        return _legacy_tile_entity_base(
+            "etfuturum:modern_parity_copper_chest",x,y,z,[tag(9,"Items",p_list(10,[]))]
+        )
+    return None
 
 def make_section_nbt(y, ids, metas, skylight):
     ids=np.asarray(ids,dtype=np.uint16).reshape(4096)
@@ -1598,7 +1885,7 @@ def make_section_nbt(y, ids, metas, skylight):
     if np.any(high): tags.append(tag(7,"Add",p_byte_array(pack_nibbles(high))))
     return p_compound(tags)
 
-def make_chunk_nbt(cx,cz,last_update,sections,heightmap,biomes):
+def make_chunk_nbt(cx,cz,last_update,sections,heightmap,biomes,tile_entities=None):
     sec_payload=[s for s in sections]
     level_tags=[
         tag(3,"xPos",p_int(cx)), tag(3,"zPos",p_int(cz)), tag(4,"LastUpdate",p_long(last_update or 0)),
@@ -1607,7 +1894,7 @@ def make_chunk_nbt(cx,cz,last_update,sections,heightmap,biomes):
         tag(1,"TerrainPopulated",p_byte(1)), tag(1,"LightPopulated",p_byte(0)), tag(1,"V",p_byte(1)),
         tag(4,"InhabitedTime",p_long(0)),
         tag(9,"Sections",p_list(10,sec_payload)),
-        tag(9,"Entities",p_list(10,[])), tag(9,"TileEntities",p_list(10,[])),
+        tag(9,"Entities",p_list(10,[])), tag(9,"TileEntities",p_list(10,tile_entities or [])),
     ]
     root_payload=p_compound([tag(10,"Level",p_compound(level_tags))])
     return bytes([10])+nbt_name("")+root_payload
@@ -1757,6 +2044,7 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
             stats["block_entity_types_omitted"]["<malformed>"]+=1
     height=np.zeros((16,16),dtype=np.int32)
     converted=[]
+    state_tile_entities=[]
     sec_by_target={}
     high_crop=False; low_crop=False
 
@@ -1777,11 +2065,18 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
         ty=sy+(y_offset//16)
         if not (0<=ty<=15): continue
         inds=unpack_palette_indices(s.get("data"),len(pal),4096,4)
-        mids=[]; mmeta=[]
-        for name,props in pal:
+        mids=[]; mmeta=[]; state_te_specs={}
+        for palette_index,(name,props) in enumerate(pal):
             mp=map_modern(name,props,reg,use_hbm,mapping_profile)
             rid,meta,resolved=resolve_mapping(mp,reg)
             mids.append(rid); mmeta.append(meta)
+            resolved_lower=str(resolved).lower()
+            if resolved_lower in {
+                "etfuturum:glow_lichen","etfuturum:beehive","etfuturum:bee_nest",
+                "etfuturum:barrel","etfuturum:blast_furnace","etfuturum:lit_blast_furnace",
+                "etfuturum:smoker","etfuturum:lit_smoker","etfuturum:campfire","etfuturum:soul_campfire",
+            } or (resolved_lower.startswith("etfuturum:") and resolved_lower.endswith("copper_chest")):
+                state_te_specs[palette_index]=(str(name).split(":",1)[-1],dict(props or {}),str(resolved))
             key=name
             stats["palette_seen"][key]+=1
             stats["mapping_quality"][mp.quality].add(key)
@@ -1797,6 +2092,29 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
             stone_id=reg.resolve("minecraft:stone")
             if stone_id is None: raise ConversionError("Target registry missing minecraft:stone")
             arr=np.where(mask,stone_id,arr); md=np.where(mask,0,md); ids=arr.reshape(-1); metas=md.reshape(-1)
+
+        # Some EFR state cannot live in four metadata bits at all (glow lichen),
+        # while a few EFR container blocks require a minimal TileEntity to exist
+        # after a raw Anvil import. Synthesize only those narrowly verified TEs.
+        for palette_index,(source_path,props,resolved) in state_te_specs.items():
+            flats=np.flatnonzero(inds == palette_index)
+            for flat in flats.tolist():
+                ly=int(flat)//256
+                rem=int(flat)%256
+                lz=rem//16
+                lx=rem%16
+                world_y=ty*16+ly
+                if strip_below_y>0 and world_y < strip_below_y:
+                    continue
+                payload=_etfuturum_state_tile_entity(
+                    resolved,source_path,props,cx*16+lx,world_y,cz*16+lz
+                )
+                if payload is not None:
+                    state_tile_entities.append(payload)
+                    stats["block_entities_synthesized"]+=1
+                    stats["block_entity_types_synthesized"][
+                        "etfuturum.glow_lichen" if str(resolved).lower()=="etfuturum:glow_lichen" else str(resolved).lower()
+                    ]+=1
         sec_by_target[ty]=(ids,metas)
         # Heightmap uses highest non-air block as a robust map/surface approximation.
         air_id=reg.resolve("minecraft:air")
@@ -1818,7 +2136,10 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
         converted.append(make_section_nbt(ty,ids,metas,pack_nibbles(sky)))
 
     biomes=choose_biomes(c["sections"])
-    legacy=make_chunk_nbt(cx,cz,c.get("LastUpdate",0),converted,height.reshape(-1).tolist(),biomes)
+    legacy=make_chunk_nbt(
+        cx,cz,c.get("LastUpdate",0),converted,height.reshape(-1).tolist(),biomes,
+        tile_entities=state_tile_entities,
+    )
     validate_legacy_chunk_nbt(legacy,cx,cz)
     return (cx,cz),legacy
 
@@ -2166,6 +2487,8 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
         "chunks_cropped_above_255":0,"chunks_cropped_below_0":0,
         "block_entities_omitted":0,
         "block_entity_types_omitted":collections.Counter(),
+        "block_entities_synthesized":0,
+        "block_entity_types_synthesized":collections.Counter(),
         "entities_omitted":None,
         "entity_types_omitted":{},
         "entity_scan_status":"unknown",
@@ -2190,6 +2513,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
         serial["mapping_quality"]={k:sorted(v) for k,v in report["mapping_quality"].items()}
         serial["failure_counts"]=dict(report["failure_counts"])
         serial["block_entity_types_omitted"]=dict(report["block_entity_types_omitted"])
+        serial["block_entity_types_synthesized"]=dict(report["block_entity_types_synthesized"])
         return serial
 
     def report_lines(serial):
@@ -2211,7 +2535,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             "Potential crop below Y=0: %d chunk(s)"%(serial.get("preflight") or {}).get("potential_chunks_cropped_below_0",0), "",
             "Content policy: %s"%CONTENT_POLICY,
             "Source block entities detected: %d"%int(content.get("block_entities_total",0) or 0),
-            "Block entities translated: 0",
+            "EFR state/default tile entities synthesized: %d"%int(serial.get("block_entities_synthesized",0) or 0),
             "Block entities omitted/reported during conversion: %d"%int(serial.get("block_entities_omitted",0) or 0),
             "Source entities detected: %s"%entity_text,
             "Entities translated: 0",
@@ -2236,6 +2560,13 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
                 count=int(quality_occurrences.get(quality,0) or 0)
                 if count:
                     lines.append("- %s: %d (%.3f%%)"%(quality,count,float(quality_percent.get(quality,0.0) or 0.0)))
+            stateful_total=int(preflight.get("stateful_block_occurrences_total",0) or 0)
+            stateful_preserved=int(preflight.get("stateful_block_occurrences_preserved",0) or 0)
+            if stateful_total:
+                lines.append(
+                    "- verified state fidelity: %d / %d stateful placed blocks (%.3f%%)"
+                    % (stateful_preserved,stateful_total,float(preflight.get("stateful_block_fidelity_percent",0.0) or 0.0))
+                )
             impact=preflight.get("top_non_exact_mappings") or []
             if impact:
                 lines += ["", "Highest-impact non-exact mappings:"]
@@ -2263,6 +2594,10 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
         if report["block_entity_types_omitted"]:
             lines += ["", "Block-entity loss manifest:"]
             for be,count in report["block_entity_types_omitted"].most_common():
+                lines.append("- %d × %s"%(count,be))
+        if report["block_entity_types_synthesized"]:
+            lines += ["", "Synthesized EFR state/default tile entities:"]
+            for be,count in report["block_entity_types_synthesized"].most_common():
                 lines.append("- %d × %s"%(count,be))
         if source_entities is not None and content.get("entity_types"):
             lines += ["", "Entity loss manifest (preflight audit):"]

@@ -489,10 +489,10 @@ for token in [
 # Patch 013 makes unsupported world content explicit, stages output until it is
 # structurally verified, and leaves legacy chunks marked for target-side relight.
 for token in [
-    'CONTENT_POLICY = "terrain_blocks_with_loss_manifest"',
+    'CONTENT_POLICY = "terrain_blocks_with_loss_manifest_and_efr_state_tile_entities"',
     'LIGHTING_STRATEGY = "target_runtime_relight"',
     'HEIGHTMAP_STRATEGY = "bootstrap_highest_non_air"',
-    'BLOCK_PROPERTY_STRATEGY = "source_properties_to_legacy_metadata_plus_runtime_neighbors"',
+    'BLOCK_PROPERTY_STRATEGY = "source_properties_to_legacy_metadata_plus_efr_state_tile_entities_plus_runtime_neighbors"',
     '"block_entities":[]',
     'elif k == "block_entities" and t == 9:',
     'def discover_source_entity_regions(',

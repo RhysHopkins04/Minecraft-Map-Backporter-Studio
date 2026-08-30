@@ -1093,10 +1093,11 @@ class BackportTab(AsyncTab):
             )
             impact = p.get("mapping_quality_percent") or {}
             exact_pct = float(impact.get("exact", 0.0) or 0.0) + float(impact.get("backport_exact", 0.0) or 0.0)
+            state_pct = float(p.get("stateful_block_fidelity_percent", 100.0) or 0.0)
             self.preflight_status.setText(
                 f"READY • {rep.get('regions', 0):,} regions • {p.get('chunks', 0):,} chunks • "
                 f"{p.get('unique_palette_states', 0):,} unique in-range palette states • "
-                f"{exact_pct:.1f}% exact by placed blocks • {provider_text} • "
+                f"{exact_pct:.1f}% exact by placed blocks • {state_pct:.1f}% verified state fidelity • {provider_text} • "
                 f"{be_count:,} block entities • {entity_text} • "
                 f"{len(profile.get('enabled_catalogs') or []):,} enabled catalog(s){warning}"
             )
@@ -1115,12 +1116,12 @@ class BackportTab(AsyncTab):
             if entity_total is None:
                 content_line = (
                     f"{be_count:,} block entity record(s) were found. Entity-region data could not be audited from this input form. "
-                    "The current backend reports these records but does not translate entities/block entities yet."
+                    "The current backend reports these records and only synthesizes narrowly verified EFR state/default tile entities; arbitrary source entities/block entities are not generally translated yet."
                 )
             else:
                 content_line = (
                     f"{be_count:,} block entity record(s) and {int(entity_total):,} entity record(s) were found. "
-                    "The current backend reports them in the loss manifest but does not translate them yet."
+                    "The current backend reports them in the loss manifest; only narrowly verified EFR state/default tile entities are synthesized, while arbitrary source records are not generally translated yet."
                 )
             unavailable = p.get("unavailable_backport_candidates") or []
             if unavailable:
@@ -1135,6 +1136,7 @@ class BackportTab(AsyncTab):
                 "Conversion preflight ready",
                 f"Validated {p.get('chunks', 0):,} source chunks against the target registry and active mapping profile. "
                 f"Mapping impact is {exact_pct:.2f}% exact/backport-exact across placed in-range non-air blocks; "
+                f"verified state fidelity is {state_pct:.2f}% across placed blocks that carry source properties; "
                 f"{provider_registered_targets:,}/{provider_catalog_targets:,} catalog backport target(s) are actually registered in the selected template. "
                 f"The log lists the highest-impact non-exact mappings.{unavailable_line}{content_line} "
                 "Output chunks will request a target-side relight. No output world was created. Convert map is now enabled.",

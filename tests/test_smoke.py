@@ -387,6 +387,38 @@ def test_etfuturum_native_target_registry_priority_without_catalog():
         "etfuturum:cut_copper_slab": 722,
         "etfuturum:campfire": 723,
         "etfuturum:white_glazed_terracotta": 724,
+        "etfuturum:wildflowers": 725,
+        "etfuturum:leaf_litter": 726,
+        "etfuturum:oak_shelf": 727,
+        "etfuturum:end_rod": 728,
+        "etfuturum:barrel": 729,
+        "etfuturum:light": 730,
+        "etfuturum:lantern": 731,
+        "etfuturum:soul_lantern": 732,
+        "etfuturum:beehive": 733,
+        "etfuturum:blast_furnace": 734,
+        "etfuturum:lit_blast_furnace": 735,
+        "etfuturum:loom": 736,
+        "etfuturum:waxed_weathered_lightning_rod": 737,
+        "etfuturum:chain": 738,
+        "etfuturum:deepslate": 739,
+        "etfuturum:sweet_berry_bush": 740,
+        "etfuturum:beetroots": 741,
+        "etfuturum:composter": 742,
+        "etfuturum:grindstone": 743,
+        "etfuturum:turtle_egg": 744,
+        "etfuturum:tube_coral_wall_fan": 745,
+        "etfuturum:glow_lichen": 746,
+        "etfuturum:barrier": 747,
+        "etfuturum:pale_oak_fence": 748,
+        "etfuturum:mangrove_pressure_plate": 749,
+        "etfuturum:muddy_mangrove_roots": 750,
+        "etfuturum:scaffolding": 751,
+        "etfuturum:pink_petals": 752,
+        "etfuturum:waxed_exposed_copper_chain": 753,
+        "etfuturum:waxed_weathered_copper_lantern": 754,
+        "etfuturum:pearlescent_froglight": 755,
+        "etfuturum:waxed_exposed_copper_chest": 756,
     })
 
     # Deliberately bind Catalog Workspace to HBM only. EFR still wins because
@@ -436,6 +468,93 @@ def test_etfuturum_native_target_registry_priority_without_catalog():
         "minecraft:white_glazed_terracotta", {"facing":"south"}, reg, True, hbm_only
     )
     assert glazed.target == "etfuturum:white_glazed_terracotta" and glazed.meta == 2
+
+    # State contracts verified against the attached EFR Plus 1.7.10 source.
+    assert legacy1710_engine.map_modern(
+        "minecraft:wildflowers", {"facing":"east", "flower_amount":"4"}, reg, True, hbm_only
+    ).meta == 13
+    assert legacy1710_engine.map_modern(
+        "minecraft:leaf_litter", {"facing":"west", "segment_amount":"2"}, reg, True, hbm_only
+    ).meta == 7
+    shelf = legacy1710_engine.map_modern(
+        "minecraft:oak_shelf", {"facing":"south", "powered":"false", "side_chain":"unconnected"}, reg, True, hbm_only
+    )
+    assert shelf.meta == 2 and shelf.quality == "backport_exact"
+    powered_shelf = legacy1710_engine.map_modern(
+        "minecraft:oak_shelf", {"facing":"south", "powered":"true", "side_chain":"unconnected"}, reg, True, hbm_only
+    )
+    assert powered_shelf.meta == 2 and powered_shelf.quality == "backport_close"
+    assert legacy1710_engine.map_modern("minecraft:end_rod", {"facing":"west"}, reg, True, hbm_only).meta == 4
+    assert legacy1710_engine.map_modern("minecraft:barrel", {"facing":"east", "open":"false"}, reg, True, hbm_only).meta == 5
+    assert legacy1710_engine.map_modern("minecraft:light", {"level":"15"}, reg, True, hbm_only).meta == 15
+    assert legacy1710_engine.map_modern("minecraft:lantern", {"hanging":"true", "waterlogged":"false"}, reg, True, hbm_only).meta == 1
+    assert legacy1710_engine.map_modern("minecraft:soul_lantern", {"hanging":"false", "waterlogged":"false"}, reg, True, hbm_only).meta == 0
+    assert legacy1710_engine.map_modern("minecraft:beehive", {"facing":"east", "honey_level":"5"}, reg, True, hbm_only).meta == 11
+    assert legacy1710_engine.map_modern("minecraft:blast_furnace", {"facing":"west", "lit":"false"}, reg, True, hbm_only).meta == 4
+    lit_furnace = legacy1710_engine.map_modern("minecraft:blast_furnace", {"facing":"west", "lit":"true"}, reg, True, hbm_only)
+    assert lit_furnace.target == "etfuturum:lit_blast_furnace" and lit_furnace.meta == 4
+    assert legacy1710_engine.map_modern("minecraft:loom", {"facing":"east"}, reg, True, hbm_only).meta == 3
+    assert legacy1710_engine.map_modern("minecraft:waxed_weathered_lightning_rod", {"facing":"down", "powered":"false", "waterlogged":"false"}, reg, True, hbm_only).meta == 0
+    assert legacy1710_engine.map_modern("minecraft:iron_chain", {"axis":"x", "waterlogged":"false"}, reg, True, hbm_only).target == "etfuturum:chain"
+    assert legacy1710_engine.map_modern("minecraft:iron_chain", {"axis":"z", "waterlogged":"false"}, reg, True, hbm_only).meta == 2
+    assert legacy1710_engine.map_modern("minecraft:deepslate", {"axis":"x"}, reg, True, hbm_only).meta == 4
+    assert legacy1710_engine.map_modern("minecraft:sweet_berry_bush", {"age":"3"}, reg, True, hbm_only).meta == 3
+    assert legacy1710_engine.map_modern("minecraft:beetroots", {"age":"1"}, reg, True, hbm_only).meta == 2
+    assert legacy1710_engine.map_modern("minecraft:beetroots", {"age":"3"}, reg, True, hbm_only).meta == 7
+    assert legacy1710_engine.map_modern("minecraft:composter", {"level":"8"}, reg, True, hbm_only).meta == 8
+    assert legacy1710_engine.map_modern("minecraft:grindstone", {"face":"wall", "facing":"west"}, reg, True, hbm_only).meta == 7
+    assert legacy1710_engine.map_modern("minecraft:turtle_egg", {"eggs":"3", "hatch":"2"}, reg, True, hbm_only).meta == 10
+    assert legacy1710_engine.map_modern("minecraft:tube_coral_wall_fan", {"facing":"east", "waterlogged":"false"}, reg, True, hbm_only).meta == 5
+    assert legacy1710_engine.map_modern("minecraft:barrier", {"waterlogged":"false"}, reg, True, hbm_only).quality == "backport_exact"
+    fence = legacy1710_engine.map_modern(
+        "minecraft:pale_oak_fence", {"north":"true", "east":"false", "south":"true", "west":"false", "waterlogged":"false"}, reg, True, hbm_only
+    )
+    assert fence.meta == 0 and fence.quality == "backport_exact"
+    assert legacy1710_engine.map_modern("minecraft:mangrove_pressure_plate", {"powered":"true"}, reg, True, hbm_only).meta == 1
+    assert legacy1710_engine.map_modern("minecraft:muddy_mangrove_roots", {"axis":"z"}, reg, True, hbm_only).meta == 8
+    assert legacy1710_engine.map_modern(
+        "minecraft:scaffolding", {"distance":"3", "bottom":"true", "waterlogged":"false"}, reg, True, hbm_only
+    ).meta == 11
+    assert legacy1710_engine.map_modern(
+        "minecraft:pink_petals", {"facing":"south", "flower_amount":"3"}, reg, True, hbm_only
+    ).meta == 14
+    copper_chain = legacy1710_engine.map_modern(
+        "minecraft:waxed_exposed_copper_chain", {"axis":"z", "waterlogged":"false"}, reg, True, hbm_only
+    )
+    assert copper_chain.meta == 2 and copper_chain.quality == "backport_close"
+    copper_lantern = legacy1710_engine.map_modern(
+        "minecraft:waxed_weathered_copper_lantern", {"hanging":"true", "waterlogged":"false"}, reg, True, hbm_only
+    )
+    assert copper_lantern.meta == 1 and copper_lantern.quality == "backport_close"
+    froglight = legacy1710_engine.map_modern("minecraft:pearlescent_froglight", {"axis":"z"}, reg, True, hbm_only)
+    assert froglight.meta == 8 and froglight.quality == "backport_close"
+    copper_chest = legacy1710_engine.map_modern(
+        "minecraft:waxed_exposed_copper_chest", {"facing":"south", "type":"single", "waterlogged":"false"}, reg, True, hbm_only
+    )
+    assert copper_chest.meta == 3 and copper_chest.quality == "backport_exact"
+    lichen = legacy1710_engine.map_modern(
+        "minecraft:glow_lichen", {"north":"true", "west":"true", "waterlogged":"false"}, reg, True, hbm_only
+    )
+    assert lichen.target == "etfuturum:glow_lichen" and lichen.meta == 0 and lichen.quality == "backport_exact"
+
+    lichen_te = legacy1710_engine._etfuturum_state_tile_entity(
+        "etfuturum:glow_lichen", "glow_lichen",
+        {"north":"true", "west":"true", "waterlogged":"false"}, 4, 80, -2,
+    )
+    hive_te = legacy1710_engine._etfuturum_state_tile_entity(
+        "etfuturum:beehive", "beehive", {"honey_level":"5"}, 5, 81, -2,
+    )
+    chest_te = legacy1710_engine._etfuturum_state_tile_entity(
+        "etfuturum:waxed_exposed_copper_chest", "waxed_exposed_copper_chest", {}, 6, 82, -2,
+    )
+    legacy_with_state_tes = legacy1710_engine.make_chunk_nbt(
+        0, 0, 0, [], [0] * 256, [1] * 256, [lichen_te, hive_te, chest_te]
+    )
+    _, parsed_legacy = legacy1710_engine.parse_nbt(legacy_with_state_tes)
+    tes = parsed_legacy["Level"]["TileEntities"]
+    assert tes[0]["id"] == "etfuturum.glow_lichen" and tes[0]["State"] == 20
+    assert tes[1]["id"] == "etfuturum.hive" and tes[1]["honeyLevel"] == 5 and tes[1]["Bees"] == []
+    assert tes[2]["id"] == "etfuturum:modern_parity_copper_chest" and tes[2]["Items"] == []
 
     # Real 1.7.10 vanilla identities still win; provider matching is for missing
     # modern content rather than hijacking old vanilla blocks.
