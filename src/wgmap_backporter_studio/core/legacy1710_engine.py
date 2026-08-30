@@ -67,6 +67,75 @@ FLOWER_META = {
 }
 DOUBLE_PLANT_META = {"sunflower":0, "lilac":1, "tall_grass":2, "large_fern":3, "rose_bush":4, "peony":5}
 
+# Et Futurum Requiem is a special first-class provider for the 1.7.10 writer.
+# Unlike ordinary catalog providers, its presence can be proven directly from the
+# selected template world's Forge registry. This means conversion does not depend
+# on packaged textures/models (important for EFR Plus' launch-time Mojang asset
+# downloader) or on the user manually adding an analyzer catalog first.
+ET_FUTURUM_NAMESPACE = "etfuturum"
+
+# Existing EFR blocks sometimes pack several modern vanilla identities into one
+# legacy block ID + metadata value. These aliases are stable upstream registry
+# conventions; the target registry is still authoritative and every candidate is
+# rejected if that concrete EFR registry block is not actually present.
+ET_FUTURUM_SIMPLE_SUBTYPES = {
+    "granite": ("stone", 1),
+    "polished_granite": ("stone", 2),
+    "diorite": ("stone", 3),
+    "polished_diorite": ("stone", 4),
+    "andesite": ("stone", 5),
+    "polished_andesite": ("stone", 6),
+    "prismarine": ("prismarine_block", 0),
+    "prismarine_bricks": ("prismarine_block", 1),
+    "dark_prismarine": ("prismarine_block", 2),
+    "cracked_deepslate_bricks": ("deepslate_bricks", 1),
+    "deepslate_tiles": ("deepslate_bricks", 2),
+    "cracked_deepslate_tiles": ("deepslate_bricks", 3),
+    "chiseled_deepslate": ("deepslate_bricks", 4),
+    "polished_tuff": ("tuff", 1),
+    "tuff_bricks": ("tuff", 2),
+    "chiseled_tuff": ("tuff", 3),
+    "chiseled_tuff_bricks": ("tuff", 4),
+    "red_nether_bricks": ("red_netherbrick", 0),
+    "cracked_nether_bricks": ("red_netherbrick", 1),
+    "chiseled_nether_bricks": ("red_netherbrick", 2),
+    "end_stone_bricks": ("end_bricks", 0),
+    "dirt_path": ("grass_path", 0),
+    "bone_block": ("bone", 0),
+    "slime_block": ("slime", 0),
+    "crimson_nylium": ("nylium", 0),
+    "warped_nylium": ("nylium", 1),
+    "nether_wart_block": ("nether_wart", 0),
+    "warped_wart_block": ("nether_wart", 1),
+}
+
+ET_FUTURUM_WOOD_META = {
+    "crimson": 0, "warped": 1, "mangrove": 2, "cherry": 3, "bamboo": 4,
+}
+
+ET_FUTURUM_COPPER_BLOCK_META = {
+    "copper_block": 0, "exposed_copper": 1, "weathered_copper": 2, "oxidized_copper": 3,
+    "cut_copper": 4, "exposed_cut_copper": 5, "weathered_cut_copper": 6, "oxidized_cut_copper": 7,
+    "waxed_copper_block": 8, "waxed_exposed_copper": 9, "waxed_weathered_copper": 10, "waxed_oxidized_copper": 11,
+    "waxed_cut_copper": 12, "waxed_exposed_cut_copper": 13, "waxed_weathered_cut_copper": 14, "waxed_oxidized_cut_copper": 15,
+}
+ET_FUTURUM_CHISELED_COPPER_META = {
+    "chiseled_copper": 0, "exposed_chiseled_copper": 1, "weathered_chiseled_copper": 2, "oxidized_chiseled_copper": 3,
+    "waxed_chiseled_copper": 4, "waxed_exposed_chiseled_copper": 5, "waxed_weathered_chiseled_copper": 6, "waxed_oxidized_chiseled_copper": 7,
+}
+ET_FUTURUM_COPPER_GRATE_META = {
+    "copper_grate": 0, "exposed_copper_grate": 1, "weathered_copper_grate": 2, "oxidized_copper_grate": 3,
+    "waxed_copper_grate": 4, "waxed_exposed_copper_grate": 5, "waxed_weathered_copper_grate": 6, "waxed_oxidized_copper_grate": 7,
+}
+ET_FUTURUM_COPPER_BULB_BASE_META = {
+    "copper_bulb": 0, "exposed_copper_bulb": 1, "weathered_copper_bulb": 2, "oxidized_copper_bulb": 3,
+    "waxed_copper_bulb": 8, "waxed_exposed_copper_bulb": 9, "waxed_weathered_copper_bulb": 10, "waxed_oxidized_copper_bulb": 11,
+}
+ET_FUTURUM_CUT_COPPER_SLAB_META = {
+    "cut_copper_slab": 0, "exposed_cut_copper_slab": 1, "weathered_cut_copper_slab": 2, "oxidized_cut_copper_slab": 3,
+    "waxed_cut_copper_slab": 4, "waxed_exposed_cut_copper_slab": 5, "waxed_weathered_cut_copper_slab": 6, "waxed_oxidized_cut_copper_slab": 7,
+}
+
 # Vanilla 1.7.10 biome IDs. Modern biomes are mapped to the nearest old biome.
 BIOME_ID = {
     "ocean":0, "plains":1, "desert":2, "extreme_hills":3, "forest":4,
@@ -509,6 +578,21 @@ def validate_target_registry(
         raise ConversionError("Target block registry contains IDs outside the 1.7.10 block range 0..4095: %s" % sample)
     log("Target registry: %s" % reg.summary())
 
+    etfuturum_entries=reg.namespace_count(ET_FUTURUM_NAMESPACE)
+    provider_replacements_enabled=_safe_provider_replacements_enabled(use_hbm,mapping_profile)
+    if etfuturum_entries:
+        if provider_replacements_enabled:
+            log(
+                "Native backport provider: Et Futurum detected with %d registered block ID(s); "
+                "registered exact/subtype matches will be tried before catalog, HBM, or vanilla fallbacks. "
+                "Packaged textures/models are not required for this detection." % etfuturum_entries
+            )
+        else:
+            log(
+                "NOTICE: Et Futurum is present in the target registry (%d block ID(s)), but detected/catalog backport replacements are disabled."
+                % etfuturum_entries
+            )
+
     if mapping_profile is not None and mapping_profile.catalog_bound:
         enabled=", ".join(sorted(mapping_profile.enabled_mod_ids)) or "none"
         log(
@@ -554,6 +638,8 @@ def validate_target_registry(
         "provider_namespace_entries":{ns:reg.namespace_count(ns) for ns in provider_namespaces},
         "backport_provider_targets_catalog":provider_target_total,
         "backport_provider_targets_registered":provider_target_registered,
+        "etfuturum_entries":etfuturum_entries,
+        "etfuturum_native_priority":bool(etfuturum_entries and provider_replacements_enabled),
     }
 
 
@@ -643,6 +729,200 @@ def _provider_state_meta(path, props):
     return 0, False
 
 
+def _safe_provider_replacements_enabled(use_hbm, mapping_profile):
+    if mapping_profile is not None:
+        return bool(mapping_profile.allow_safe_mod_replacements)
+    return bool(use_hbm)
+
+
+def _etfuturum_registered(reg: TargetRegistry) -> bool:
+    return reg.namespace_count(ET_FUTURUM_NAMESPACE) > 0
+
+
+def _etfuturum_registry_name(path: str) -> str:
+    return ET_FUTURUM_NAMESPACE + ":" + path
+
+
+def _horizontal_quadrant(props):
+    """EFR Plus parity-model N/E/S/W metadata convention."""
+    return {"north": 0, "east": 1, "south": 2, "west": 3}.get(str(props.get("facing", "north")).lower(), 0)
+
+
+def _etfuturum_state_meta(path, props):
+    """Metadata translator for direct EFR/modern identity matches.
+
+    EFR Plus deliberately uses modern registry paths for its parity blocks, but
+    1.7.10 still has only four metadata bits. Handle the state layouts that the
+    fork exposes explicitly, then fall back to the generic provider translator.
+    """
+    p=path.lower()
+    if p.endswith("_wall_hanging_sign"):
+        return sign_wall_meta(props), True
+    if p.endswith("_bed"):
+        return door_bed_meta(props), True
+    if p.endswith("_glazed_terracotta"):
+        return _horizontal_quadrant(props), True
+    if p == "campfire" or p == "soul_campfire":
+        return _horizontal_quadrant(props) | (4 if boolprop(props,"lit") else 0), True
+    if p == "candle" or (p.endswith("_candle") and not p.endswith("_candle_cake")):
+        try:
+            count=max(1,min(4,int(props.get("candles","1"))))
+        except Exception:
+            count=1
+        return (count-1) | (4 if boolprop(props,"lit") else 0), True
+    if p == "candle_cake" or p.endswith("_candle_cake"):
+        return 1 if boolprop(props,"lit") else 0, True
+    if p == "copper_bulb":
+        meta=ET_FUTURUM_COPPER_BULB_BASE_META[p]
+        if boolprop(props,"lit"): meta|=4
+        return meta, True
+    return _provider_state_meta(p,props)
+
+
+def _etfuturum_alias(path, props):
+    """Resolve modern vanilla identities packed into established EFR block IDs.
+
+    Return ``(target_path, meta, state_exact, note)``. The caller still checks
+    the selected template registry before accepting the result.
+    """
+    p=path.lower()
+
+    simple=ET_FUTURUM_SIMPLE_SUBTYPES.get(p)
+    if simple is not None:
+        return simple[0], simple[1], True, "EFR legacy subtype metadata"
+
+    for color,cmeta in COLOR_META.items():
+        if p == color+"_concrete":
+            return "concrete",cmeta,True,"EFR packed concrete colour"
+        if p == color+"_concrete_powder":
+            return "concrete_powder",cmeta,True,"EFR packed concrete-powder colour"
+
+    # Existing EFR prismarine/deepslate/tuff slab and wall blocks pack material
+    # variants in their low metadata bits and use bit 3 for a top slab.
+    slab_aliases={
+        "prismarine_brick_slab":("prismarine_slab",1),
+        "dark_prismarine_slab":("prismarine_slab",2),
+        "cobbled_deepslate_slab":("deepslate_slab",0),
+        "polished_deepslate_slab":("deepslate_slab",1),
+        "deepslate_tile_slab":("deepslate_brick_slab",1),
+        "polished_tuff_slab":("tuff_slab",1),
+        "tuff_brick_slab":("tuff_slab",2),
+    }
+    if p in slab_aliases:
+        target,base=slab_aliases[p]
+        return target,slab_meta(base,props),True,"EFR packed slab subtype"
+
+    wall_aliases={
+        "prismarine_brick_wall":("prismarine_wall",1),
+        "dark_prismarine_wall":("prismarine_wall",2),
+        "cobbled_deepslate_wall":("deepslate_wall",0),
+        "polished_deepslate_wall":("deepslate_wall",1),
+        "deepslate_tile_wall":("deepslate_brick_wall",1),
+        "polished_tuff_wall":("tuff_wall",1),
+        "tuff_brick_wall":("tuff_wall",2),
+    }
+    if p in wall_aliases:
+        target,meta=wall_aliases[p]
+        return target,meta,True,"EFR packed wall subtype"
+
+    stair_aliases={
+        "prismarine_brick_stairs":"prismarine_stairs_brick",
+        "dark_prismarine_stairs":"prismarine_stairs_dark",
+    }
+    if p in stair_aliases:
+        return stair_aliases[p],stair_meta(props),True,"EFR legacy stair registry identity"
+
+    # EFR's modern wood families predate the parity-shell layer and intentionally
+    # share IDs for planks/slabs/fences/leaves/saplings.
+    for wood,wmeta in ET_FUTURUM_WOOD_META.items():
+        if p == wood+"_planks":
+            return "wood_planks",wmeta,True,"EFR packed modern wood planks"
+        if p == wood+"_slab":
+            return "wood_slab",slab_meta(wmeta,props),True,"EFR packed modern wood slab"
+        if p == wood+"_fence":
+            return "wood_fence",wmeta,True,"EFR packed modern wood fence"
+    if p == "mangrove_leaves":
+        return "leaves",4,True,"EFR packed mangrove leaves; persistent bit set"
+    if p == "cherry_leaves":
+        return "leaves",5,True,"EFR packed cherry leaves; persistent bit set"
+    if p == "mangrove_propagule":
+        stage=8 if str(props.get("stage","0")) == "1" else 0
+        return "sapling",0|stage,True,"EFR packed mangrove propagule"
+    if p == "cherry_sapling":
+        stage=8 if str(props.get("stage","0")) == "1" else 0
+        return "sapling",1|stage,True,"EFR packed cherry sapling"
+
+    # EFR BaseLog stores log/wood/stripped-log/stripped-wood in low bits 0..3.
+    for wood,target in (("mangrove","mangrove_log"),("cherry","cherry_log")):
+        if p == "stripped_"+wood+"_log":
+            return target,2|log_axis_bits(props),True,"EFR packed stripped log"
+        if p == wood+"_wood":
+            return target,1,True,"EFR packed bark/wood block"
+        if p == "stripped_"+wood+"_wood":
+            return target,3,True,"EFR packed stripped wood block"
+    for wood,target in (("crimson","crimson_stem"),("warped","warped_stem")):
+        if p == "stripped_"+wood+"_stem":
+            return target,2|log_axis_bits(props),True,"EFR packed stripped stem"
+        if p == wood+"_hyphae":
+            return target,1,True,"EFR packed hyphae block"
+        if p == "stripped_"+wood+"_hyphae":
+            return target,3,True,"EFR packed stripped hyphae block"
+    if p == "stripped_bamboo_block":
+        return "bamboo_block",1|log_axis_bits(props),True,"EFR packed stripped bamboo block"
+
+    if p in ET_FUTURUM_COPPER_BLOCK_META:
+        return "copper_block",ET_FUTURUM_COPPER_BLOCK_META[p],True,"EFR packed copper/cut-copper state"
+    if p in ET_FUTURUM_CHISELED_COPPER_META:
+        return "chiseled_copper",ET_FUTURUM_CHISELED_COPPER_META[p],True,"EFR packed chiseled-copper oxidation/wax state"
+    if p in ET_FUTURUM_COPPER_GRATE_META:
+        return "copper_grate",ET_FUTURUM_COPPER_GRATE_META[p],True,"EFR packed copper-grate oxidation/wax state"
+    if p in ET_FUTURUM_COPPER_BULB_BASE_META:
+        target="powered_copper_bulb" if boolprop(props,"powered") else "copper_bulb"
+        meta=ET_FUTURUM_COPPER_BULB_BASE_META[p] | (4 if boolprop(props,"lit") else 0)
+        return target,meta,True,"EFR packed copper-bulb oxidation/wax/light state"
+    if p in ET_FUTURUM_CUT_COPPER_SLAB_META:
+        meta=ET_FUTURUM_CUT_COPPER_SLAB_META[p] | (8 if props.get("type") == "top" else 0)
+        return "cut_copper_slab",meta,True,"EFR packed cut-copper slab state"
+
+    return None
+
+
+def _map_etfuturum_first(name, props, reg: TargetRegistry):
+    """Return a first-class Et Futurum mapping proven by the target registry.
+
+    This intentionally does not consult Catalog Workspace or JAR assets. EFR Plus
+    may download Mojang assets at launch; block availability is instead proven by
+    the Forge 1.7.10 registry snapshot in the selected target/template world.
+    """
+    if not _etfuturum_registered(reg):
+        return None
+    p=name.split(":",1)[-1].lower()
+
+    # Never replace a genuine 1.7.10 vanilla identity merely because EFR also
+    # has something similarly named. This keeps old-world semantics stable.
+    if reg.resolve("minecraft:"+p) is not None:
+        return None
+
+    direct=_etfuturum_registry_name(p)
+    if reg.resolve(direct) is not None:
+        meta,state_exact=_etfuturum_state_meta(p,props or {})
+        quality="backport_exact" if state_exact else "backport_close"
+        note="Et Futurum target detected directly in the selected Forge registry"
+        if not state_exact:
+            note += "; exact block identity but state metadata is only partially translatable"
+        return Mapping(direct,meta&15,quality,note)
+
+    alias=_etfuturum_alias(p,props or {})
+    if alias is None:
+        return None
+    target_path,meta,state_exact,detail=alias
+    target=_etfuturum_registry_name(target_path)
+    if reg.resolve(target) is None:
+        return None
+    quality="backport_exact" if state_exact else "backport_close"
+    return Mapping(target,meta&15,quality,"Et Futurum target detected in the selected Forge registry; "+detail)
+
+
 def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: MappingProfile | None = None):
     """Return the closest legacy block mapping.
 
@@ -668,10 +948,21 @@ def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: 
         return V(fallback,fbmeta,"approximate", fallback_note)
 
     if name in AIR_NAMES: return V("minecraft:air")
-    # Invisible/editor-only modern blocks are safer omitted than turned into visible cubes.
-    if p in {"barrier","structure_block","jigsaw","light","end_gateway"}: return V("minecraft:air",0,"omitted","Modern editor/invisible block omitted")
 
-    # A backport provider may expose the same modern vanilla registry path in a
+    # Et Futurum is the preferred 1.7.10 modern-content provider when its block
+    # is actually registered in the selected target/template world. This is
+    # target-registry driven, so it works even when EFR Plus downloads Mojang
+    # textures/models at runtime and no EFR catalog has been added manually.
+    if _safe_provider_replacements_enabled(use_hbm,mapping_profile):
+        etfuturum_mapping=_map_etfuturum_first(name,props or {},reg)
+        if etfuturum_mapping is not None:
+            return etfuturum_mapping
+
+    # If no real provider block exists, invisible/editor-only modern blocks are
+    # safer omitted than turned into unrelated visible fallback cubes.
+    if p in {"barrier","structure_block","structure_void","jigsaw","light","end_gateway"}: return V("minecraft:air",0,"omitted","Modern editor/invisible block omitted")
+
+    # Other catalog backport providers may expose the same modern vanilla registry path in a
     # 1.7.10 namespace. Do not let that shadow a real 1.7.10 vanilla block of the
     # same name, and never trust a catalog target that is absent from the actual
     # template-world registry.

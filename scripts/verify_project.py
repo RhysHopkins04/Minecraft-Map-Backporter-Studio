@@ -340,7 +340,7 @@ for token in [
     "self.yoff.setMaximumWidth(180)",
     "self.strip.setMaximumWidth(180)",
     "self.log.setMinimumHeight(150)",
-    'QCheckBox("Use enabled catalog/backport block replacements")',
+    'QCheckBox("Use detected backport providers and catalog replacements")',
     'self.scan_btn = QPushButton("Preflight conversion")',
     'self.preflight_status = _muted(',
     'self.recommended_btn = QPushButton("Use recommended")',
@@ -417,6 +417,13 @@ for token in [
     'def test_legacy_directional_metadata_and_provider_registry_diagnostics():',
     'assert legacy1710_engine.trapdoor_meta({"facing": "north", "half": "bottom", "open": "false"}) == 0',
     'assert legacy1710_engine.door_meta({"half": "upper", "hinge": "right", "powered": "true"}) == 11',
+    'def test_backport_provider_registry_discovery_without_packaged_textures():',
+    'assert "etfuturum:moss_block" in names',
+    'assert all(row.texture_paths == [] for row in catalog.blocks)',
+    'def test_etfuturum_native_target_registry_priority_without_catalog():',
+    'assert moss.target == "etfuturum:moss_block" and moss.quality == "backport_exact"',
+    'assert bulb.target == "etfuturum:powered_copper_bulb" and bulb.meta == 5',
+    'assert summary["etfuturum_native_priority"] is True',
 ]:
     if token not in test_smoke:
         error(f"Analyzer/provider/preview regression test missing: {token}")
@@ -433,6 +440,14 @@ for token in [
     'Backport candidates present in catalogs but unavailable in the selected template:',
     '"provider_namespace_entries":{ns:reg.namespace_count(ns)',
     'm={"north":0,"south":1,"west":2,"east":3}.get(props.get("facing"),0)',
+    'ET_FUTURUM_NAMESPACE = "etfuturum"',
+    'def _map_etfuturum_first(name, props, reg: TargetRegistry):',
+    'if _safe_provider_replacements_enabled(use_hbm,mapping_profile):',
+    'etfuturum_mapping=_map_etfuturum_first(name,props or {},reg)',
+    'Et Futurum target detected in the selected Forge registry',
+    '"Native backport provider: Et Futurum detected with %d registered block ID(s); "',
+    '"etfuturum_native_priority":bool(etfuturum_entries and provider_replacements_enabled)',
+    '"Packaged textures/models are not required for this detection."',
 ]:
     if token not in legacy:
         error(f"Patch 015 mapping-impact/provider invariant missing: {token}")
@@ -600,6 +615,8 @@ for token in [
     'path + ".mcmeta" in names',
     'provider targets registered',
     'catalog backport target(s) are actually registered in the selected template',
+    'Use detected backport providers and catalog replacements',
+    'target-registry providers such as Et Futurum can still be detected during preflight.',
 ]:
     if token not in main_window:
         error(f"Analyzer inventory-preview invariant missing: {token}")

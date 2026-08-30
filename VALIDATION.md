@@ -129,6 +129,20 @@ Verify the following:
 - `WG_BACKPORT_REPORT.json` and `.txt` record the mapping profile and whether the verified preflight was reused.
 
 
+## Native Et Futurum target-provider validation
+
+The 1.7.10 writer recognizes Et Futurum directly from the selected template world's Forge registry; a manually imported Et Futurum analyzer catalog is not required for this path. Validate with a template created/saved in the exact destination pack and with the desired Et Futurum features enabled:
+
+- leave the compatibility replacement option enabled and run preflight without requiring an Et Futurum catalog in Catalog Workspace;
+- confirm the log reports `Native backport provider: Et Futurum detected` plus the number of registered `etfuturum:*` block IDs;
+- confirm the log states that packaged textures/models are not required for provider detection; this is required for Et Futurum Plus builds whose Mojang assets are resolved at launch;
+- confirm a registered same-name target such as `minecraft:moss_block` -> `etfuturum:moss_block` is reported as `backport_exact` rather than falling through to grass/HBM;
+- confirm established packed EFR identities use their correct block ID + metadata where registered (for example concrete colours, bountiful stones, prismarine, modern wood planks/slabs/fences/leaves, deepslate/tuff subtypes and copper variants);
+- confirm a block absent from the template registry is never invented merely because the source/JAR contains code for it;
+- confirm existing 1.7.10 vanilla identities such as `minecraft:stone` remain vanilla;
+- disable the compatibility replacement option and confirm native Et Futurum priority is disabled as an explicit opt-out;
+- changing the target/template world or replacement option must continue to invalidate any prior preflight before conversion.
+
 ## World-content audit, staged output, and legacy round-trip validation
 
 Patch 013 deliberately separates **terrain/block conversion** from world content that is not yet safe to translate across modern Java → Forge 1.7.10.

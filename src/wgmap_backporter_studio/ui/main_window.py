@@ -822,11 +822,11 @@ class BackportTab(AsyncTab):
         og.setHorizontalSpacing(12)
         og.setVerticalSpacing(8)
 
-        self.hbm = QCheckBox("Use enabled catalog/backport block replacements")
+        self.hbm = QCheckBox("Use detected backport providers and catalog replacements")
         self.hbm.setChecked(True)
         self.hbm.setToolTip(
-            "Prefer exact registered blocks from enabled backport-provider catalogs, then use reviewed architectural/decorative rules "
-            "from enabled mod namespaces. The target world's actual registry remains authoritative."
+            "Prefer Et Futurum blocks detected directly in the target/template Forge registry, then exact registered blocks from enabled "
+            "backport-provider catalogs, then reviewed architectural/decorative rules. The target registry remains authoritative."
         )
         self.catalog_status = _muted("")
         self.yoff = QSpinBox()
@@ -967,7 +967,7 @@ class BackportTab(AsyncTab):
         labels = snapshot["enabled_catalogs"]
         mods = snapshot["enabled_mod_ids"]
         if not labels:
-            text = "Catalog Workspace: 0 enabled catalogs • safe mod rules will fall back to vanilla targets."
+            text = "Catalog Workspace: 0 enabled catalogs • target-registry providers such as Et Futurum can still be detected during preflight."
         else:
             provider_count = len(snapshot.get("backport_providers") or [])
             text = (

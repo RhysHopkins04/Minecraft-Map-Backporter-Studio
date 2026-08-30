@@ -336,6 +336,126 @@ def test_backport_provider_mapping_profile():
 
 
 
+def test_backport_provider_registry_discovery_without_packaged_textures():
+    # Et Futurum Plus can resolve Mojang assets at launch rather than packaging
+    # them in the mod JAR. Registration discovery must remain class/enum driven.
+    with tempfile.TemporaryDirectory() as td:
+        jar = Path(td) / "etfuturum-runtime-assets.jar"
+        with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("mcmod.info", json.dumps([{
+                "modid": "etfuturum", "name": "Et Futurum Requiem Plus",
+                "version": "3.0-test", "mcversion": "1.7.10",
+            }]))
+            z.writestr("future/ModBlocks.class", _minimal_enum_block_registry_class())
+        catalog = analyze_jar(jar)
+        names = {row.registry_hint for row in catalog.blocks}
+        assert catalog.provider_role == "backport_provider"
+        assert "etfuturum:moss_block" in names
+        assert "etfuturum:cherry_door" in names
+        assert "etfuturum:campfire" in names
+        assert all(row.texture_paths == [] for row in catalog.blocks)
+
+
+def test_etfuturum_native_target_registry_priority_without_catalog():
+    reg = legacy1710_engine.TargetRegistry({
+        "minecraft:air": 0, "minecraft:stone": 1, "minecraft:grass": 2,
+        "minecraft:dirt": 3, "minecraft:cobblestone": 4, "minecraft:planks": 5,
+        "minecraft:bedrock": 7, "minecraft:water": 9,
+        "hbm:tile.concrete_smooth": 600,
+        "etfuturum:moss_block": 700,
+        "etfuturum:stone": 701,
+        "etfuturum:concrete": 702,
+        "etfuturum:concrete_powder": 703,
+        "etfuturum:prismarine_block": 704,
+        "etfuturum:wood_planks": 705,
+        "etfuturum:wood_slab": 706,
+        "etfuturum:wood_fence": 707,
+        "etfuturum:leaves": 708,
+        "etfuturum:sapling": 709,
+        "etfuturum:mangrove_log": 710,
+        "etfuturum:crimson_stem": 711,
+        "etfuturum:deepslate_bricks": 712,
+        "etfuturum:tuff": 713,
+        "etfuturum:red_netherbrick": 714,
+        "etfuturum:nylium": 715,
+        "etfuturum:nether_wart": 716,
+        "etfuturum:copper_block": 717,
+        "etfuturum:chiseled_copper": 718,
+        "etfuturum:copper_grate": 719,
+        "etfuturum:copper_bulb": 720,
+        "etfuturum:powered_copper_bulb": 721,
+        "etfuturum:cut_copper_slab": 722,
+        "etfuturum:campfire": 723,
+        "etfuturum:white_glazed_terracotta": 724,
+    })
+
+    # Deliberately bind Catalog Workspace to HBM only. EFR still wins because
+    # its active presence is proven by the target/template Forge registry.
+    hbm_only = profile_from_catalog_snapshot({
+        "enabled_catalogs": ["HBM"],
+        "enabled_mod_ids": ["hbm"],
+        "registry_hints": ["hbm:tile.concrete_smooth"],
+        "candidate_count": 1,
+    }, True)
+
+    moss = legacy1710_engine.map_modern("minecraft:moss_block", {}, reg, True, hbm_only)
+    assert moss.target == "etfuturum:moss_block" and moss.quality == "backport_exact"
+    assert "target registry" in moss.note.lower()
+
+    assert legacy1710_engine.map_modern("minecraft:granite", {}, reg, True, hbm_only) == legacy1710_engine.Mapping("etfuturum:stone", 1, "backport_exact", "Et Futurum target detected in the selected Forge registry; EFR legacy subtype metadata")
+    assert legacy1710_engine.map_modern("minecraft:polished_andesite", {}, reg, True, hbm_only).meta == 6
+    assert legacy1710_engine.map_modern("minecraft:white_concrete", {}, reg, True, hbm_only).target == "etfuturum:concrete"
+    assert legacy1710_engine.map_modern("minecraft:black_concrete_powder", {}, reg, True, hbm_only).meta == 15
+    assert legacy1710_engine.map_modern("minecraft:dark_prismarine", {}, reg, True, hbm_only).meta == 2
+    assert legacy1710_engine.map_modern("minecraft:mangrove_planks", {}, reg, True, hbm_only).meta == 2
+    assert legacy1710_engine.map_modern("minecraft:cherry_leaves", {}, reg, True, hbm_only).meta == 5
+    assert legacy1710_engine.map_modern("minecraft:mangrove_propagule", {"stage":"1"}, reg, True, hbm_only).meta == 8
+    assert legacy1710_engine.map_modern("minecraft:stripped_mangrove_log", {"axis":"x"}, reg, True, hbm_only).meta == 6
+    assert legacy1710_engine.map_modern("minecraft:crimson_hyphae", {"axis":"z"}, reg, True, hbm_only).meta == 1
+    assert legacy1710_engine.map_modern("minecraft:deepslate_tiles", {}, reg, True, hbm_only).meta == 2
+    assert legacy1710_engine.map_modern("minecraft:polished_tuff", {}, reg, True, hbm_only).meta == 1
+    assert legacy1710_engine.map_modern("minecraft:warped_wart_block", {}, reg, True, hbm_only).meta == 1
+
+    # Copper families are packed by EFR into stable legacy IDs + metadata.
+    assert legacy1710_engine.map_modern("minecraft:waxed_oxidized_copper", {}, reg, True, hbm_only).meta == 11
+    bulb = legacy1710_engine.map_modern(
+        "minecraft:exposed_copper_bulb", {"lit":"true", "powered":"true"}, reg, True, hbm_only
+    )
+    assert bulb.target == "etfuturum:powered_copper_bulb" and bulb.meta == 5
+    slab = legacy1710_engine.map_modern(
+        "minecraft:waxed_weathered_cut_copper_slab", {"type":"top"}, reg, True, hbm_only
+    )
+    assert slab.target == "etfuturum:cut_copper_slab" and slab.meta == 14
+
+    # Direct parity blocks keep their known legacy state where representable.
+    campfire = legacy1710_engine.map_modern(
+        "minecraft:campfire", {"facing":"west", "lit":"true"}, reg, True, hbm_only
+    )
+    assert campfire.target == "etfuturum:campfire" and campfire.meta == 7
+    glazed = legacy1710_engine.map_modern(
+        "minecraft:white_glazed_terracotta", {"facing":"south"}, reg, True, hbm_only
+    )
+    assert glazed.target == "etfuturum:white_glazed_terracotta" and glazed.meta == 2
+
+    # Real 1.7.10 vanilla identities still win; provider matching is for missing
+    # modern content rather than hijacking old vanilla blocks.
+    assert legacy1710_engine.map_modern("minecraft:stone", {}, reg, True, hbm_only).target == "minecraft:stone"
+
+    logs = []
+    summary = legacy1710_engine.validate_target_registry(reg, True, logs.append, hbm_only)
+    assert summary["etfuturum_entries"] > 0
+    assert summary["etfuturum_native_priority"] is True
+    assert any("Native backport provider: Et Futurum detected" in line for line in logs)
+    assert any("Packaged textures/models are not required" in line for line in logs)
+
+    # The existing compatibility toggle remains an explicit opt-out.
+    replacements_off = profile_from_catalog_snapshot({
+        "enabled_catalogs": [], "enabled_mod_ids": [], "registry_hints": [], "candidate_count": 0,
+    }, False)
+    moss_off = legacy1710_engine.map_modern("minecraft:moss_block", {}, reg, True, replacements_off)
+    assert moss_off.target != "etfuturum:moss_block"
+
+
 def test_legacy_directional_metadata_and_provider_registry_diagnostics():
     # 1.7.10 trapdoor metadata is north=0, south=1, west=2, east=3.
     assert legacy1710_engine.trapdoor_meta({"facing": "north", "half": "bottom", "open": "false"}) == 0
