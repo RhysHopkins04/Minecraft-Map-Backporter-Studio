@@ -136,6 +136,129 @@ ET_FUTURUM_CUT_COPPER_SLAB_META = {
     "waxed_cut_copper_slab": 4, "waxed_exposed_cut_copper_slab": 5, "waxed_weathered_cut_copper_slab": 6, "waxed_oxidized_cut_copper_slab": 7,
 }
 
+# EFR 1.7.10 registry identities that intentionally do not mirror the modern
+# vanilla block path one-for-one. These are not visual fallbacks: they are the
+# actual compatibility contracts exposed by the attached/current EFR source.
+ET_FUTURUM_STONE_SLAB_2_META = {
+    "granite_slab": 0,
+    "polished_granite_slab": 1,
+    "diorite_slab": 2,
+    "polished_diorite_slab": 3,
+    "andesite_slab": 4,
+    "polished_andesite_slab": 5,
+}
+
+ET_FUTURUM_STONE_WALL_2_META = {
+    "granite_wall": 0,
+    "diorite_wall": 1,
+    "andesite_wall": 2,
+}
+
+ET_FUTURUM_STONE_SLAB_META = {
+    "stone_slab": 0,
+    "mossy_cobblestone_slab": 1,
+    "mossy_stone_brick_slab": 2,
+    "cut_sandstone_slab": 3,
+}
+
+ET_FUTURUM_STONE_WALL_META = {
+    "stone_brick_wall": 0,
+    "mossy_stone_brick_wall": 1,
+    "sandstone_wall": 2,
+    "brick_wall": 3,
+}
+
+ET_FUTURUM_RAW_ORE_META = {
+    "raw_copper_block": 0,
+    "raw_iron_block": 1,
+    "raw_gold_block": 2,
+}
+
+ET_FUTURUM_BLACKSTONE_META = {
+    "blackstone": 0,
+    "polished_blackstone": 1,
+    "polished_blackstone_bricks": 2,
+    "cracked_polished_blackstone_bricks": 3,
+    "chiseled_polished_blackstone": 4,
+}
+
+ET_FUTURUM_BLACKSTONE_SLAB_META = {
+    "blackstone_slab": 0,
+    "polished_blackstone_slab": 1,
+    "polished_blackstone_brick_slab": 2,
+}
+
+ET_FUTURUM_BLACKSTONE_WALL_META = {
+    "blackstone_wall": 0,
+    "polished_blackstone_wall": 1,
+    "polished_blackstone_brick_wall": 2,
+}
+
+ET_FUTURUM_NETHER_ROOT_META = {"crimson_roots": 0, "warped_roots": 1}
+ET_FUTURUM_NETHER_FUNGUS_META = {"crimson_fungus": 0, "warped_fungus": 1}
+
+# Modern 1.13+ names for the five pre-1.13 wood families are reversed in the
+# EFR registry because the original backport predates the flattened naming
+# scheme (for example spruce_door -> door_spruce).
+ET_FUTURUM_LEGACY_WOOD_PATHS = {
+    "fence": "fence_{wood}",
+    "fence_gate": "fence_gate_{wood}",
+    "door": "door_{wood}",
+    "trapdoor": "trapdoor_{wood}",
+    "button": "button_{wood}",
+    "pressure_plate": "pressure_plate_{wood}",
+    "sign": "sign_{wood}",
+    "wall_sign": "wall_sign_{wood}",
+}
+
+# These modern names collide with a real 1.7.10 vanilla registry name whose
+# *meaning* changed after flattening. They therefore must be allowed to select
+# the EFR compatibility block even though a same-named legacy vanilla block is
+# present in the target registry.
+ET_FUTURUM_VANILLA_COLLISION_OVERRIDES = {
+    "stone_stairs",
+    "stone_slab",
+}
+
+# Modern potted-block identities -> the 1.7.10/Forge item identity and item
+# damage stored by TileEntityFlowerPot. EFR's potable plants use their real
+# registered ItemBlock IDs from the selected target world rather than guessed
+# numeric IDs.
+FLOWER_POT_CONTENTS = {
+    "potted_dandelion": ("minecraft:yellow_flower", 0),
+    "potted_poppy": ("minecraft:red_flower", 0),
+    "potted_blue_orchid": ("minecraft:red_flower", 1),
+    "potted_allium": ("minecraft:red_flower", 2),
+    "potted_azure_bluet": ("minecraft:red_flower", 3),
+    "potted_red_tulip": ("minecraft:red_flower", 4),
+    "potted_orange_tulip": ("minecraft:red_flower", 5),
+    "potted_white_tulip": ("minecraft:red_flower", 6),
+    "potted_pink_tulip": ("minecraft:red_flower", 7),
+    "potted_oxeye_daisy": ("minecraft:red_flower", 8),
+    "potted_oak_sapling": ("minecraft:sapling", 0),
+    "potted_spruce_sapling": ("minecraft:sapling", 1),
+    "potted_birch_sapling": ("minecraft:sapling", 2),
+    "potted_jungle_sapling": ("minecraft:sapling", 3),
+    "potted_acacia_sapling": ("minecraft:sapling", 4),
+    "potted_dark_oak_sapling": ("minecraft:sapling", 5),
+    "potted_red_mushroom": ("minecraft:red_mushroom", 0),
+    "potted_brown_mushroom": ("minecraft:brown_mushroom", 0),
+    "potted_dead_bush": ("minecraft:deadbush", 0),
+    "potted_fern": ("minecraft:tallgrass", 2),
+    "potted_cactus": ("minecraft:cactus", 0),
+    "potted_cornflower": ("etfuturum:cornflower", 0),
+    "potted_lily_of_the_valley": ("etfuturum:lily_of_the_valley", 0),
+    "potted_wither_rose": ("etfuturum:wither_rose", 0),
+    "potted_crimson_roots": ("etfuturum:nether_roots", 0),
+    "potted_warped_roots": ("etfuturum:nether_roots", 1),
+    "potted_crimson_fungus": ("etfuturum:nether_fungus", 0),
+    "potted_warped_fungus": ("etfuturum:nether_fungus", 1),
+    # Parity-shell plants are still representable in the vanilla flower-pot TE
+    # when their ItemBlock exists, even if they do not implement EFR's placement
+    # helper interface. Marking quality is handled conservatively below.
+    "potted_torchflower": ("etfuturum:torchflower", 0),
+}
+
 # Vanilla 1.7.10 biome IDs. Modern biomes are mapped to the nearest old biome.
 BIOME_ID = {
     "ocean":0, "plains":1, "desert":2, "extreme_hills":3, "forest":4,
@@ -428,13 +551,15 @@ TARGET_REGISTRY_SENTINELS = (
 
 
 class TargetRegistry:
-    def __init__(self, ids, *, source_format="unknown", raw_entries=0, ignored_items=0, aliases=None):
+    def __init__(self, ids, *, source_format="unknown", raw_entries=0, ignored_items=0, aliases=None, item_ids=None):
         self.ids=dict(ids)
+        self.item_ids=dict(item_ids or {})
         self.source_format=source_format
         self.raw_entries=int(raw_entries)
         self.ignored_items=int(ignored_items)
         self.aliases=dict(aliases or {})
         self._lower={k.lower():v for k,v in self.ids.items()}
+        self._item_lower={k.lower():v for k,v in self.item_ids.items()}
         self._aliases_lower={str(k).lower():str(v) for k,v in self.aliases.items()}
         self._hbm_by_logical={}
         self._namespace_counts=collections.Counter()
@@ -460,6 +585,10 @@ class TargetRegistry:
             alias=self._aliases_lower.get(alias.lower())
         return None
 
+    def resolve_item(self, name):
+        if name in self.item_ids: return self.item_ids[name]
+        return self._item_lower.get(str(name).lower())
+
     def resolve_hbm(self, logical):
         return self._hbm_by_logical.get(logical.lower())
 
@@ -474,7 +603,7 @@ class TargetRegistry:
         return int(self._namespace_counts.get(str(namespace).strip().lower(),0))
 
     def summary(self):
-        ignored=("; %d item entries ignored" % self.ignored_items) if self.ignored_items else ""
+        ignored=("; %d item entries excluded from block-ID count" % self.ignored_items) if self.ignored_items else ""
         return "%d block IDs from %s (%d HBM entries%s)" % (len(self.ids),self.source_format,self.hbm_count,ignored)
 
 
@@ -512,7 +641,7 @@ def _target_registry_from_fml(fml):
     # producing thousands of unusable names such as '\x01minecraft:stone'.
     item_data=fml.get("ItemData",[])
     if isinstance(item_data,list) and item_data:
-        block_ids={}; ignored_items=0; malformed=0
+        block_ids={}; item_ids={}; ignored_items=0; malformed=0
         for e in item_data:
             if not isinstance(e,dict) or "K" not in e or "V" not in e:
                 malformed+=1; continue
@@ -521,6 +650,8 @@ def _target_registry_from_fml(fml):
                 name=raw_name[1:]
                 if name: block_ids[name]=value
             elif raw_name.startswith(FML_ITEM_DISCRIMINATOR):
+                name=raw_name[1:]
+                if name: item_ids[name]=value
                 ignored_items+=1
             else:
                 malformed+=1
@@ -531,7 +662,7 @@ def _target_registry_from_fml(fml):
             )
         reg=TargetRegistry(
             block_ids, source_format="Forge 1.7.10 FML/ItemData", raw_entries=len(item_data),
-            ignored_items=ignored_items, aliases=_block_aliases_from_fml(fml),
+            ignored_items=ignored_items, aliases=_block_aliases_from_fml(fml), item_ids=item_ids,
         )
         reg.malformed_entries=malformed
         return reg
@@ -661,6 +792,46 @@ def stair_meta(props):
 
 def slab_meta(base, props):
     return base | (8 if props.get("type") == "top" else 0)
+
+def huge_mushroom_meta(props):
+    """Modern mushroom face booleans -> 1.7.10 huge-mushroom metadata.
+
+    Mirrors the converter used by the attached EFR source so mushroom stems and
+    cap blocks retain their six-face visual state instead of becoming unrelated
+    architectural material.
+    """
+    up=boolprop(props,"up"); down=boolprop(props,"down")
+    north=boolprop(props,"north"); east=boolprop(props,"east")
+    south=boolprop(props,"south"); west=boolprop(props,"west")
+    if not any((up,down,north,east,south,west)):
+        return 0
+    if up:
+        if east and north: return 3
+        if east and south: return 9
+        if east: return 6
+        if west and north: return 1
+        if west and south: return 7
+        if west: return 4
+        if north: return 2
+        if south: return 8
+        return 5
+    return 14
+
+def flower_pot_content(path, reg):
+    spec=FLOWER_POT_CONTENTS.get(str(path).lower())
+    if spec is None:
+        return None
+    item_name,data=spec
+    item_id=reg.resolve_item(item_name) if hasattr(reg,"resolve_item") else None
+    # Synthetic/test registries often only declare block IDs. In 1.7.10 the
+    # corresponding ItemBlock normally shares the numeric ID, so use that only
+    # when no item snapshot was supplied at all. Real FML/ItemData templates
+    # carry item_ids and therefore never rely on this fallback.
+    if item_id is None and not getattr(reg,"item_ids",{}):
+        item_id=reg.resolve(item_name)
+    if item_id is None:
+        return None
+    return int(item_id),int(data),item_name
 
 def log_axis_bits(props, wood_block=False):
     if wood_block: return 12
@@ -977,6 +1148,148 @@ def _etfuturum_alias(path, props):
     """
     p=path.lower()
 
+    # Modern coloured/standing/wall banners are one EFR block plus state TE.
+    for color,cmeta in COLOR_META.items():
+        if p == color+"_banner":
+            return "banner",int(props.get("rotation","0")) & 15,True,"EFR banner block + standing/banner colour tile state"
+        if p == color+"_wall_banner":
+            return "banner",sign_wall_meta(props),True,"EFR banner block + wall/banner colour tile state"
+
+    # EFR keeps every shulker colour in one block. Facing and colour live in
+    # TileEntityShulkerBox rather than block metadata.
+    if p == "shulker_box":
+        return "shulker_box",0,True,"EFR shulker-box tile state"
+    for color in COLOR_META:
+        if p == color+"_shulker_box":
+            return "shulker_box",0,True,"EFR packed dyed shulker-box tile state"
+
+    # Registry-name collisions/renames where a same-named 1.7.10 vanilla block
+    # would otherwise be selected even though it has different modern meaning.
+    if p == "stone_stairs":
+        return "stone_stairs",stair_meta(props),True,"EFR real-stone stair identity (legacy minecraft:stone_stairs is cobblestone)"
+
+    # EFR's extra stone slab block is the actual modern stone slab. The legacy
+    # minecraft:stone_slab meta 0 is the modern *smooth* stone slab instead.
+    if p in ET_FUTURUM_STONE_SLAB_META:
+        base=ET_FUTURUM_STONE_SLAB_META[p]
+        if props.get("type") == "double":
+            return "double_stone_slab",base,True,"EFR extra vanilla slab subtype (double)"
+        return "stone_slab",base | (8 if props.get("type") == "top" else 0),True,"EFR extra vanilla slab subtype"
+
+    if p in ET_FUTURUM_STONE_SLAB_2_META:
+        base=ET_FUTURUM_STONE_SLAB_2_META[p]
+        if props.get("type") == "double":
+            return "double_stone_slab_2",base,True,"EFR bountiful-stone slab subtype (double)"
+        return "stone_slab_2",base | (8 if props.get("type") == "top" else 0),True,"EFR bountiful-stone slab subtype"
+
+    if p in ET_FUTURUM_STONE_WALL_META:
+        return "stone_wall",ET_FUTURUM_STONE_WALL_META[p],True,"EFR extra vanilla wall subtype"
+    if p in ET_FUTURUM_STONE_WALL_2_META:
+        return "stone_wall_2",ET_FUTURUM_STONE_WALL_2_META[p],True,"EFR bountiful-stone wall subtype"
+
+    if p in ET_FUTURUM_RAW_ORE_META:
+        return "raw_ore_block",ET_FUTURUM_RAW_ORE_META[p],True,"EFR packed raw-ore block subtype"
+
+    if p == "mud_bricks":
+        return "packed_mud",1,True,"EFR packed mud-brick subtype"
+
+    if p == "flowering_azalea":
+        return "azalea",1,True,"EFR flowering azalea subtype"
+    if p == "flowering_azalea_leaves":
+        # Low bit = flowering subtype; bit 2 keeps imported map foliage
+        # persistent so it does not decay immediately after conversion.
+        return "azalea_leaves",5,True,"EFR flowering azalea-leaf subtype; persistent bit set"
+
+    if p in {"cave_vines","cave_vines_plant"}:
+        target="cave_vine" if p == "cave_vines" else "cave_vine_plant"
+        berries=1 if boolprop(props,"berries") else 0
+        exact=_only_default_runtime_props(props,ignored={"berries"})
+        # Modern cave-vine age is a growth scheduler state and EFR has no
+        # one-to-one metadata slot for it. Preserve the visible berry state but
+        # be conservative when age is present/non-default.
+        if "age" in props and str(props.get("age","0")) not in {"0","25"}:
+            exact=False
+        return target,berries,exact,"EFR cave-vine identity and berry/light state"
+
+    if p in {"weeping_vines_plant","weeping_vines"}:
+        return "weeping_vines",0,_only_default_runtime_props(props,ignored={"age"}),"EFR unified weeping-vine head/body block"
+    if p in {"twisting_vines_plant","twisting_vines"}:
+        return "twisting_vines",0,_only_default_runtime_props(props,ignored={"age"}),"EFR unified twisting-vine head/body block"
+
+    if p in ET_FUTURUM_NETHER_ROOT_META:
+        return "nether_roots",ET_FUTURUM_NETHER_ROOT_META[p],True,"EFR packed crimson/warped roots subtype"
+    if p in ET_FUTURUM_NETHER_FUNGUS_META:
+        return "nether_fungus",ET_FUTURUM_NETHER_FUNGUS_META[p],True,"EFR packed crimson/warped fungus subtype"
+
+    if p == "magma_block":
+        return "magma",0,True,"EFR legacy registry rename for magma block"
+    if p == "wet_sponge":
+        return "sponge",1,True,"EFR wet sponge subtype"
+
+    # End-brick / red-nether-brick legacy registry spelling differences.
+    if p == "end_stone_brick_stairs":
+        return "end_brick_stairs",stair_meta(props),True,"EFR legacy end-brick stair registry identity"
+    if p == "end_stone_brick_slab":
+        target="double_end_brick_slab" if props.get("type") == "double" else "end_brick_slab"
+        return target,(8 if props.get("type") == "top" and target == "end_brick_slab" else 0),True,"EFR legacy end-brick slab registry identity"
+    if p == "end_stone_brick_wall":
+        return "end_brick_wall",0,True,"EFR legacy end-brick wall registry identity"
+    if p == "red_nether_brick_stairs":
+        return "red_netherbrick_stairs",stair_meta(props),True,"EFR legacy red-nether-brick stair registry identity"
+    if p == "red_nether_brick_slab":
+        target="double_red_netherbrick_slab" if props.get("type") == "double" else "red_netherbrick_slab"
+        return target,(8 if props.get("type") == "top" and target == "red_netherbrick_slab" else 0),True,"EFR legacy red-nether-brick slab registry identity"
+
+    if p in ET_FUTURUM_BLACKSTONE_META and p != "blackstone":
+        return "blackstone",ET_FUTURUM_BLACKSTONE_META[p],True,"EFR packed blackstone subtype"
+    if p in ET_FUTURUM_BLACKSTONE_SLAB_META:
+        base=ET_FUTURUM_BLACKSTONE_SLAB_META[p]
+        target="double_blackstone_slab" if props.get("type") == "double" else "blackstone_slab"
+        meta=base if target.startswith("double_") else base | (8 if props.get("type") == "top" else 0)
+        return target,meta,True,"EFR packed blackstone slab subtype"
+    if p in ET_FUTURUM_BLACKSTONE_WALL_META:
+        return "blackstone_wall",ET_FUTURUM_BLACKSTONE_WALL_META[p],True,"EFR packed blackstone wall subtype"
+
+    # EFR supplies stripped variants for the six legacy wood species in two
+    # packed BlockLog IDs. This prevents stripped old woods from silently
+    # degrading back to ordinary vanilla logs.
+    for wood,species in (("oak",0),("spruce",1),("birch",2),("jungle",3)):
+        if p == "stripped_"+wood+"_log":
+            return "wood_stripped",species | log_axis_bits(props),True,"EFR packed stripped legacy log"
+        if p == "stripped_"+wood+"_wood":
+            return "wood_stripped",species | 12,True,"EFR packed stripped legacy wood/bark block"
+    for wood,species in (("acacia",0),("dark_oak",1)):
+        if p == "stripped_"+wood+"_log":
+            return "wood2_stripped",species | log_axis_bits(props),True,"EFR packed stripped legacy log"
+        if p == "stripped_"+wood+"_wood":
+            return "wood2_stripped",species | 12,True,"EFR packed stripped legacy wood/bark block"
+
+    # Pre-flattening wood-family registry names in EFR are reversed. Oak stays
+    # vanilla and is handled in map_modern; these are the five non-oak families.
+    for wood in ("spruce","birch","jungle","acacia","dark_oak"):
+        prefix=wood+"_"
+        if p.startswith(prefix):
+            rest=p[len(prefix):]
+            target_template=ET_FUTURUM_LEGACY_WOOD_PATHS.get(rest)
+            if target_template:
+                target=target_template.format(wood=wood)
+                if rest == "fence":
+                    return target,0,True,"EFR legacy wood-fence registry identity"
+                if rest == "fence_gate":
+                    return target,gate_meta(props),True,"EFR legacy wood fence-gate registry identity"
+                if rest == "door":
+                    return target,door_meta(props),True,"EFR legacy wood-door registry identity"
+                if rest == "trapdoor":
+                    return target,trapdoor_meta(props),True,"EFR legacy wood-trapdoor registry identity"
+                if rest == "button":
+                    return target,button_meta(props),True,"EFR legacy wood-button registry identity"
+                if rest == "pressure_plate":
+                    return target,(1 if boolprop(props,"powered") else 0),True,"EFR legacy wood pressure-plate registry identity"
+                if rest == "sign":
+                    return target,int(props.get("rotation","0")) & 15,True,"EFR legacy wood-sign registry identity"
+                if rest == "wall_sign":
+                    return target,sign_wall_meta(props),True,"EFR legacy wood wall-sign registry identity"
+
     simple=ET_FUTURUM_SIMPLE_SUBTYPES.get(p)
     if simple is not None:
         return simple[0], simple[1], True, "EFR legacy subtype metadata"
@@ -1094,11 +1407,6 @@ def _map_etfuturum_first(name, props, reg: TargetRegistry):
         return None
     p=name.split(":",1)[-1].lower()
 
-    # Never replace a genuine 1.7.10 vanilla identity merely because EFR also
-    # has something similarly named. This keeps old-world semantics stable.
-    if reg.resolve("minecraft:"+p) is not None:
-        return None
-
     # Furnace-like EFR blocks retain separate lit/unlit 1.7.10 registry IDs.
     # Prefer the lit identity when the modern state says lit and the selected
     # target registry actually contains that concrete block.
@@ -1113,6 +1421,25 @@ def _map_etfuturum_first(name, props, reg: TargetRegistry):
                 note += "; exact block identity but some source state is not represented"
             return Mapping(lit_direct,meta&15,quality,note)
 
+    # Resolve source identities that EFR deliberately packs into shared legacy
+    # registry IDs *before* same-name/direct matching. This is required for
+    # flattened names such as andesite_slab -> stone_slab_2 and for semantic
+    # collisions such as modern stone_slab/stone_stairs, whose same-named 1.7.10
+    # vanilla blocks mean something different.
+    alias=_etfuturum_alias(p,props or {})
+    if alias is not None:
+        target_path,meta,state_exact,detail=alias
+        target=_etfuturum_registry_name(target_path)
+        if reg.resolve(target) is not None:
+            quality="backport_exact" if state_exact else "backport_close"
+            return Mapping(target,meta&15,quality,"Et Futurum target detected in the selected Forge registry; "+detail)
+
+    # Never replace a genuine 1.7.10 vanilla identity merely because EFR also
+    # has something similarly named, except for the explicitly documented
+    # post-flattening semantic collisions above.
+    if reg.resolve("minecraft:"+p) is not None and p not in ET_FUTURUM_VANILLA_COLLISION_OVERRIDES:
+        return None
+
     direct=_etfuturum_registry_name(p)
     if reg.resolve(direct) is not None:
         meta,state_exact=_etfuturum_state_meta(p,props or {})
@@ -1122,15 +1449,7 @@ def _map_etfuturum_first(name, props, reg: TargetRegistry):
             note += "; exact block identity but state metadata is only partially translatable"
         return Mapping(direct,meta&15,quality,note)
 
-    alias=_etfuturum_alias(p,props or {})
-    if alias is None:
-        return None
-    target_path,meta,state_exact,detail=alias
-    target=_etfuturum_registry_name(target_path)
-    if reg.resolve(target) is None:
-        return None
-    quality="backport_exact" if state_exact else "backport_close"
-    return Mapping(target,meta&15,quality,"Et Futurum target detected in the selected Forge registry; "+detail)
+    return None
 
 
 def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: MappingProfile | None = None):
@@ -1167,6 +1486,48 @@ def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: 
         etfuturum_mapping=_map_etfuturum_first(name,props or {},reg)
         if etfuturum_mapping is not None:
             return etfuturum_mapping
+
+    # Exact pre-flattening aliases that do not require a backport provider.
+    # These must run before generic/catalog fallbacks because the modern names
+    # either did not exist in 1.7.10 or changed meaning during flattening.
+    if p == "smooth_stone_slab":
+        if props.get("type") == "double":
+            return V("minecraft:double_stone_slab",0,"exact","Modern smooth-stone slab is legacy stone_slab subtype 0")
+        return V("minecraft:stone_slab",8 if props.get("type") == "top" else 0,"exact","Modern smooth-stone slab is legacy stone_slab subtype 0")
+    if p == "short_grass":
+        return V("minecraft:tallgrass",1,"exact","Modern short_grass is legacy tallgrass subtype 1")
+    if p == "mushroom_stem":
+        return V("minecraft:red_mushroom_block",huge_mushroom_meta(props or {}),"exact","Modern mushroom stem uses legacy huge-mushroom face metadata")
+    if p in {"brown_mushroom_block","red_mushroom_block"}:
+        return V("minecraft:"+p,huge_mushroom_meta(props or {}),"exact","Preserved legacy huge-mushroom face metadata")
+
+    # Oak kept vanilla registry identities through 1.7.10, but flattening added
+    # the explicit oak_ prefix. Normalize those names without downgrading them.
+    oak_aliases={
+        "oak_fence":("minecraft:fence",0),
+        "oak_fence_gate":("minecraft:fence_gate",gate_meta(props or {})),
+        "oak_door":("minecraft:wooden_door",door_meta(props or {})),
+        "oak_trapdoor":("minecraft:trapdoor",trapdoor_meta(props or {})),
+        "oak_button":("minecraft:wooden_button",button_meta(props or {})),
+        "oak_pressure_plate":("minecraft:wooden_pressure_plate",1 if boolprop(props or {},"powered") else 0),
+        "oak_sign":("minecraft:standing_sign",int((props or {}).get("rotation","0")) & 15),
+        "oak_wall_sign":("minecraft:wall_sign",sign_wall_meta(props or {})),
+    }
+    if p in oak_aliases:
+        target,meta=oak_aliases[p]
+        return V(target,meta,"exact","Flattened oak registry name normalized to its 1.7.10 identity")
+
+    # Potted modern identities all use the old flower-pot block plus a target
+    # item ID/data pair in TileEntityFlowerPot. Real Forge ItemData is used so
+    # modded EFR item IDs are never guessed.
+    if p in FLOWER_POT_CONTENTS:
+        content=flower_pot_content(p,reg)
+        if content is not None and reg.resolve("minecraft:flower_pot") is not None:
+            _item_id,_data,item_name=content
+            quality="exact" if item_name.startswith("minecraft:") else "backport_exact"
+            if p == "potted_torchflower":
+                quality="backport_close"
+            return V("minecraft:flower_pot",0,quality,"Flower-pot content preserved through target ItemData tile state")
 
     # If no real provider block exists, invisible/editor-only modern blocks are
     # safer omitted than turned into unrelated visible fallback cubes.
@@ -1227,13 +1588,16 @@ def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: 
                 return V("minecraft:leaves2",(wmeta-4)|4)
             if rest=="sapling": return V("minecraft:sapling",wmeta)
             if rest=="stairs": return V("minecraft:"+wood+"_stairs",stair_meta(props))
-            if rest=="slab": return V("minecraft:wooden_slab",slab_meta(wmeta,props))
+            if rest=="slab":
+                if props.get("type") == "double":
+                    return V("minecraft:double_wooden_slab",wmeta)
+                return V("minecraft:wooden_slab",wmeta | (8 if props.get("type") == "top" else 0))
             if rest=="fence": return V("minecraft:fence",0,"approximate","1.7.10 has only oak wooden fences")
             if rest=="fence_gate": return V("minecraft:fence_gate",gate_meta(props),"approximate","1.7.10 has only oak fence gates")
             if rest=="door": return V("minecraft:wooden_door",door_meta(props),"approximate","1.7.10 has only oak wooden doors")
             if rest=="trapdoor": return V("minecraft:trapdoor",trapdoor_meta(props),"approximate","1.7.10 has only oak wooden trapdoors")
             if rest=="button": return V("minecraft:wooden_button",button_meta(props),"approximate" if wood!="oak" else "exact")
-            if rest=="pressure_plate": return V("minecraft:wooden_pressure_plate",0,"approximate" if wood!="oak" else "exact")
+            if rest=="pressure_plate": return V("minecraft:wooden_pressure_plate",1 if boolprop(props,"powered") else 0,"approximate" if wood!="oak" else "exact")
             if rest in {"sign","hanging_sign"}: return V("minecraft:standing_sign",int(props.get("rotation","0"))&15,"approximate")
             if rest=="wall_sign": return V("minecraft:wall_sign",sign_wall_meta(props),"approximate")
 
@@ -1377,7 +1741,11 @@ def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: 
         "cobblestone_slab":3,"brick_slab":4,"stone_brick_slab":5,"mossy_stone_brick_slab":5,
         "nether_brick_slab":6,"quartz_slab":7,"smooth_quartz_slab":7,
     }
-    if p in slab_base: return V("minecraft:stone_slab",slab_meta(slab_base[p],props),"exact" if p in {"stone_slab","sandstone_slab","cobblestone_slab","brick_slab","stone_brick_slab","nether_brick_slab","quartz_slab"} else "approximate")
+    if p in slab_base:
+        quality="exact" if p in {"sandstone_slab","cobblestone_slab","brick_slab","stone_brick_slab","nether_brick_slab","quartz_slab"} else "approximate"
+        if props.get("type") == "double":
+            return V("minecraft:double_stone_slab",slab_base[p],quality)
+        return V("minecraft:stone_slab",slab_base[p] | (8 if props.get("type") == "top" else 0),quality)
     if p.endswith("_slab"):
         # New stone slabs have no matching HBM slab family; keep half-block geometry using stone slab.
         return V("minecraft:stone_slab",slab_meta(0,props),"approximate","Modern slab texture unavailable; shape preserved")
@@ -1826,7 +2194,7 @@ def _legacy_tile_entity_base(te_id,x,y,z,extra_tags=()):
     ])
 
 
-def _etfuturum_state_tile_entity(target_name, _source_path, props, x, y, z):
+def _etfuturum_state_tile_entity(target_name, _source_path, props, x, y, z, reg=None):
     """Build minimal EFR TEs required for imported blockstate fidelity.
 
     These are intentionally *state* tile entities, not a claim that arbitrary
@@ -1835,6 +2203,45 @@ def _etfuturum_state_tile_entity(target_name, _source_path, props, x, y, z):
     to EFR contracts verified in the attached 1.7.10 source.
     """
     target=str(target_name).lower()
+    source_path=str(_source_path).lower()
+    if target == "etfuturum:banner":
+        base=0
+        for color,cmeta in COLOR_META.items():
+            if source_path in {color+"_banner",color+"_wall_banner"}:
+                base=cmeta
+                break
+        return _legacy_tile_entity_base(
+            "etfuturum.banner",x,y,z,[
+                tag(3,"Base",p_int(base)),
+                tag(1,"IsStanding",p_byte(0 if source_path.endswith("_wall_banner") else 1)),
+            ]
+        )
+    if target == "etfuturum:shulker_box":
+        color=0
+        for dye,cmeta in COLOR_META.items():
+            if source_path == dye+"_shulker_box":
+                color=cmeta+1
+                break
+        return _legacy_tile_entity_base(
+            "etfuturum.shulker_box",x,y,z,[
+                tag(1,"Type",p_byte(0)),tag(9,"Items",p_list(10,[])),
+                tag(1,"Color",p_byte(color)),tag(1,"Facing",p_byte(direction_meta(props or {},"facing","down"))),
+            ]
+        )
+    if target == "etfuturum:cave_vine":
+        # EFR's head block requires a non-updating state TE. Modern age is not a
+        # one-to-one match for its random maximum growth length, so use a stable
+        # permissive value while preserving visible berries in metadata.
+        return _legacy_tile_entity_base(
+            "etfuturum.cave_vines",x,y,z,[tag(3,"MaxLength",p_int(27)),tag(1,"TipSheared",p_byte(0))]
+        )
+    if target == "minecraft:flower_pot" and source_path in FLOWER_POT_CONTENTS and reg is not None:
+        content=flower_pot_content(source_path,reg)
+        if content is not None:
+            item_id,data,_item_name=content
+            return _legacy_tile_entity_base(
+                "FlowerPot",x,y,z,[tag(3,"Item",p_int(item_id)),tag(3,"Data",p_int(data))]
+            )
     if target == "etfuturum:glow_lichen":
         mask=_glow_lichen_state_mask(props or {})
         if not mask:
@@ -2075,7 +2482,9 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
                 "etfuturum:glow_lichen","etfuturum:beehive","etfuturum:bee_nest",
                 "etfuturum:barrel","etfuturum:blast_furnace","etfuturum:lit_blast_furnace",
                 "etfuturum:smoker","etfuturum:lit_smoker","etfuturum:campfire","etfuturum:soul_campfire",
-            } or (resolved_lower.startswith("etfuturum:") and resolved_lower.endswith("copper_chest")):
+                "etfuturum:banner","etfuturum:shulker_box","etfuturum:cave_vine",
+            } or (resolved_lower == "minecraft:flower_pot" and str(name).split(":",1)[-1].lower() in FLOWER_POT_CONTENTS) \
+               or (resolved_lower.startswith("etfuturum:") and resolved_lower.endswith("copper_chest")):
                 state_te_specs[palette_index]=(str(name).split(":",1)[-1],dict(props or {}),str(resolved))
             key=name
             stats["palette_seen"][key]+=1
@@ -2107,7 +2516,7 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
                 if strip_below_y>0 and world_y < strip_below_y:
                     continue
                 payload=_etfuturum_state_tile_entity(
-                    resolved,source_path,props,cx*16+lx,world_y,cz*16+lz
+                    resolved,source_path,props,cx*16+lx,world_y,cz*16+lz,reg
                 )
                 if payload is not None:
                     state_tile_entities.append(payload)

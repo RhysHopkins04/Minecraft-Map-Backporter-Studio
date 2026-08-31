@@ -962,3 +962,151 @@ def main():
     print("core smoke tests passed")
 
 if __name__ == "__main__": main()
+
+
+def test_etfuturum_identity_subtype_normalization_and_state_tile_entities():
+    ids = {
+        "minecraft:air": 0, "minecraft:stone": 1, "minecraft:grass": 2,
+        "minecraft:dirt": 3, "minecraft:cobblestone": 4, "minecraft:planks": 5,
+        "minecraft:bedrock": 7, "minecraft:water": 9,
+        "minecraft:tallgrass": 31, "minecraft:yellow_flower": 37,
+        "minecraft:red_flower": 38, "minecraft:brown_mushroom": 39,
+        "minecraft:red_mushroom": 40, "minecraft:double_stone_slab": 43,
+        "minecraft:stone_slab": 44, "minecraft:red_mushroom_block": 100,
+        "minecraft:wooden_button": 143, "minecraft:flower_pot": 140,
+        "minecraft:trapdoor": 96, "minecraft:wooden_pressure_plate": 72,
+        "minecraft:wall_sign": 68, "minecraft:fence": 85,
+        "minecraft:fence_gate": 107, "minecraft:wooden_door": 64,
+        "minecraft:stone_stairs": 67,
+        "etfuturum:banner": 500, "etfuturum:stone_stairs": 501,
+        "etfuturum:stone_slab": 502, "etfuturum:double_stone_slab": 503,
+        "etfuturum:stone_slab_2": 504, "etfuturum:double_stone_slab_2": 505,
+        "etfuturum:stone_wall": 506, "etfuturum:stone_wall_2": 507,
+        "etfuturum:raw_ore_block": 508, "etfuturum:packed_mud": 509,
+        "etfuturum:cave_vine": 510, "etfuturum:cave_vine_plant": 511,
+        "etfuturum:shulker_box": 512, "etfuturum:sponge": 513,
+        "etfuturum:azalea": 514, "etfuturum:azalea_leaves": 515,
+        "etfuturum:trapdoor_acacia": 516, "etfuturum:wall_sign_acacia": 517,
+        "etfuturum:door_dark_oak": 518, "etfuturum:wall_sign_dark_oak": 519,
+        "etfuturum:button_jungle": 520, "etfuturum:door_jungle": 521,
+        "etfuturum:fence_jungle": 522, "etfuturum:pressure_plate_jungle": 523,
+        "etfuturum:trapdoor_jungle": 524, "etfuturum:wall_sign_jungle": 525,
+        "etfuturum:fence_spruce": 526, "etfuturum:fence_gate_spruce": 527,
+        "etfuturum:pressure_plate_spruce": 528, "etfuturum:trapdoor_spruce": 529,
+        "etfuturum:wall_sign_spruce": 530, "etfuturum:wood_stripped": 531,
+        "etfuturum:wood2_stripped": 532, "etfuturum:torchflower": 533,
+    }
+    item_ids = {
+        "minecraft:yellow_flower": 37, "minecraft:red_flower": 38,
+        "etfuturum:torchflower": 533,
+    }
+    reg = legacy1710_engine.TargetRegistry(ids, item_ids=item_ids)
+    profile = profile_from_catalog_snapshot({
+        "enabled_catalogs": ["EFR"], "enabled_mod_ids": ["etfuturum"],
+        "registry_hints": ["etfuturum:banner"], "candidate_count": 1,
+    }, True)
+
+    # Same-name 1.7.10 collisions must select EFR because modern stone stairs
+    # and stone slabs do not mean the same block as their legacy namesakes.
+    stone_stairs = legacy1710_engine.map_modern(
+        "minecraft:stone_stairs", {"facing": "west", "half": "top"}, reg, True, profile
+    )
+    assert stone_stairs.target == "etfuturum:stone_stairs" and stone_stairs.meta == 5
+    stone_slab = legacy1710_engine.map_modern(
+        "minecraft:stone_slab", {"type": "top"}, reg, True, profile
+    )
+    assert stone_slab.target == "etfuturum:stone_slab" and stone_slab.meta == 8
+    double_stone = legacy1710_engine.map_modern(
+        "minecraft:stone_slab", {"type": "double"}, reg, True, profile
+    )
+    assert double_stone.target == "etfuturum:double_stone_slab" and double_stone.meta == 0
+    smooth = legacy1710_engine.map_modern(
+        "minecraft:smooth_stone_slab", {"type": "top"}, reg, True, profile
+    )
+    assert smooth.target == "minecraft:stone_slab" and smooth.meta == 8 and smooth.quality == "exact"
+    smooth_double = legacy1710_engine.map_modern(
+        "minecraft:smooth_stone_slab", {"type": "double"}, reg, True, profile
+    )
+    assert smooth_double.target == "minecraft:double_stone_slab" and smooth_double.meta == 0
+
+    # Shared EFR subtype registries are preferred over unrelated vanilla/HBM
+    # visual fallbacks.
+    assert legacy1710_engine.map_modern("minecraft:andesite_slab", {"type": "top"}, reg, True, profile).meta == 12
+    assert legacy1710_engine.map_modern("minecraft:polished_andesite_slab", {}, reg, True, profile).meta == 5
+    assert legacy1710_engine.map_modern("minecraft:granite_wall", {}, reg, True, profile).target == "etfuturum:stone_wall_2"
+    assert legacy1710_engine.map_modern("minecraft:brick_wall", {}, reg, True, profile).meta == 3
+    assert legacy1710_engine.map_modern("minecraft:raw_iron_block", {}, reg, True, profile) == legacy1710_engine.Mapping(
+        "etfuturum:raw_ore_block", 1, "backport_exact",
+        "Et Futurum target detected in the selected Forge registry; EFR packed raw-ore block subtype",
+    )
+    assert legacy1710_engine.map_modern("minecraft:mud_bricks", {}, reg, True, profile).target == "etfuturum:packed_mud"
+    assert legacy1710_engine.map_modern("minecraft:flowering_azalea", {}, reg, True, profile).meta == 1
+    assert legacy1710_engine.map_modern("minecraft:flowering_azalea_leaves", {}, reg, True, profile).meta == 5
+
+    # Legacy wood registry names in EFR are reversed after flattening.
+    assert legacy1710_engine.map_modern("minecraft:acacia_trapdoor", {"facing": "east"}, reg, True, profile).target == "etfuturum:trapdoor_acacia"
+    assert legacy1710_engine.map_modern("minecraft:jungle_button", {"face": "wall", "facing": "east", "powered": "true"}, reg, True, profile).target == "etfuturum:button_jungle"
+    assert legacy1710_engine.map_modern("minecraft:spruce_fence", {}, reg, True, profile).target == "etfuturum:fence_spruce"
+    assert legacy1710_engine.map_modern("minecraft:spruce_fence_gate", {"facing": "east", "open": "true"}, reg, True, profile).target == "etfuturum:fence_gate_spruce"
+    assert legacy1710_engine.map_modern("minecraft:oak_trapdoor", {"facing": "east"}, reg, True, profile).target == "minecraft:trapdoor"
+    assert legacy1710_engine.map_modern("minecraft:oak_wall_sign", {"facing": "east"}, reg, True, profile).quality == "exact"
+    assert legacy1710_engine.map_modern("minecraft:stripped_oak_log", {"axis": "x"}, reg, True, profile).target == "etfuturum:wood_stripped"
+    assert legacy1710_engine.map_modern("minecraft:stripped_dark_oak_wood", {}, reg, True, profile).target == "etfuturum:wood2_stripped"
+
+    # Cave-vine identity/berries are retained; age remains conservatively close
+    # because EFR's MaxLength state is not the same modern property.
+    cave = legacy1710_engine.map_modern(
+        "minecraft:cave_vines", {"berries": "true", "age": "12"}, reg, True, profile
+    )
+    assert cave.target == "etfuturum:cave_vine" and cave.meta == 1 and cave.quality == "backport_close"
+
+    # Banners/shulkers are no longer omitted/turned into chests. Their required
+    # EFR tile state is synthesized with colour/orientation.
+    banner = legacy1710_engine.map_modern(
+        "minecraft:red_wall_banner", {"facing": "east"}, reg, True, profile
+    )
+    assert banner.target == "etfuturum:banner" and banner.meta == 5
+    shulker = legacy1710_engine.map_modern(
+        "minecraft:light_gray_shulker_box", {"facing": "up"}, reg, True, profile
+    )
+    assert shulker.target == "etfuturum:shulker_box"
+    banner_te = legacy1710_engine._etfuturum_state_tile_entity(
+        banner.target, "red_wall_banner", {"facing": "east"}, 1, 64, 2, reg
+    )
+    shulker_te = legacy1710_engine._etfuturum_state_tile_entity(
+        shulker.target, "light_gray_shulker_box", {"facing": "up"}, 2, 64, 2, reg
+    )
+    cave_te = legacy1710_engine._etfuturum_state_tile_entity(
+        cave.target, "cave_vines", {"berries": "true", "age": "12"}, 3, 64, 2, reg
+    )
+
+    # Potted blocks use real target ItemData IDs; modded contents are not guessed.
+    potted = legacy1710_engine.map_modern("minecraft:potted_azure_bluet", {}, reg, True, profile)
+    torch_pot = legacy1710_engine.map_modern("minecraft:potted_torchflower", {}, reg, True, profile)
+    assert potted.target == "minecraft:flower_pot" and potted.quality == "exact"
+    assert torch_pot.target == "minecraft:flower_pot" and torch_pot.quality == "backport_close"
+    pot_te = legacy1710_engine._etfuturum_state_tile_entity(
+        potted.target, "potted_azure_bluet", {}, 4, 64, 2, reg
+    )
+    torch_pot_te = legacy1710_engine._etfuturum_state_tile_entity(
+        torch_pot.target, "potted_torchflower", {}, 5, 64, 2, reg
+    )
+
+    legacy = legacy1710_engine.make_chunk_nbt(
+        0, 0, 0, [], [0] * 256, [1] * 256,
+        [banner_te, shulker_te, cave_te, pot_te, torch_pot_te],
+    )
+    _, parsed = legacy1710_engine.parse_nbt(legacy)
+    tes = parsed["Level"]["TileEntities"]
+    assert tes[0]["id"] == "etfuturum.banner" and tes[0]["Base"] == 14 and tes[0]["IsStanding"] == 0
+    assert tes[1]["id"] == "etfuturum.shulker_box" and tes[1]["Color"] == 9 and tes[1]["Facing"] == 1
+    assert tes[2]["id"] == "etfuturum.cave_vines" and tes[2]["MaxLength"] == 27 and tes[2]["TipSheared"] == 0
+    assert tes[3]["id"] == "FlowerPot" and tes[3]["Item"] == 38 and tes[3]["Data"] == 3
+    assert tes[4]["id"] == "FlowerPot" and tes[4]["Item"] == 533 and tes[4]["Data"] == 0
+
+    assert legacy1710_engine.map_modern("minecraft:mushroom_stem", {
+        "up": "false", "down": "false", "north": "true", "south": "true", "east": "true", "west": "true",
+    }, reg, True, profile).meta == 14
+    assert legacy1710_engine.map_modern("minecraft:short_grass", {}, reg, True, profile) == legacy1710_engine.Mapping(
+        "minecraft:tallgrass", 1, "exact", "Modern short_grass is legacy tallgrass subtype 1"
+    )
