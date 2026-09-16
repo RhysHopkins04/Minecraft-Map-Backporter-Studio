@@ -58,8 +58,8 @@ if sys.platform == "darwin":
             "NSHighResolutionCapable": True,
             "CFBundleDisplayName": "WG Map Backporter Studio",
             "CFBundleName": "WG Map Backporter Studio",
-            "CFBundleShortVersionString": "0.4.1",
-            "CFBundleVersion": "0.4.1",
+            "CFBundleShortVersionString": "0.4.2",
+            "CFBundleVersion": "0.4.2",
             "LSApplicationCategoryType": "public.app-category.developer-tools",
         },
     )

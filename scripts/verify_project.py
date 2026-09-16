@@ -58,6 +58,7 @@ required = [
     "src/wgmap_backporter_studio/ui/main_window.py",
     "tests/test_smoke.py",
     "tests/test_p018_legacy_lighting_and_ladders.py",
+    "tests/test_p019_source_compat_and_dialogs.py",
     "scripts/diagnose_p018_ladders.py",
 ]
 for rel in required:
@@ -497,7 +498,7 @@ for token in [
     'HEIGHTMAP_STRATEGY = "source_skylight_derived_with_non_air_fallback"',
     'BLOCK_PROPERTY_STRATEGY = "source_properties_to_legacy_metadata_plus_efr_state_tile_entities_plus_runtime_neighbors"',
     '"block_entities":[]',
-    'elif k == "block_entities" and t == 9:',
+    'elif k in {"block_entities","TileEntities"} and t == 9:',
     'def discover_source_entity_regions(',
     'def audit_source_entities(',
     'def attach_content_audit(',
@@ -837,6 +838,26 @@ for token in [
     if token not in test_smoke:
         error(f"Patch 013 world-content/staging regression test missing: {token}")
 
+p019_test = (root / "tests" / "test_p019_source_compat_and_dialogs.py").read_text(encoding="utf-8")
+for token in [
+    "def test_p019_reads_117_level_wrapped_palette_chunks_and_converts_them():",
+    "def test_p019_reads_18_to_112_numeric_sections_and_preserves_or_backports_states():",
+    "def test_p019_113_to_115_continuous_palette_long_packing():",
+    "def test_p019_zip_source_uses_terrain_region_not_entities_or_poi_with_same_name():",
+    "def test_p019_message_boxes_have_explicit_dark_background_and_contrasting_text():",
+]:
+    if token not in p019_test:
+        error(f"Patch 019 source-compatibility regression test missing: {token}")
+
+for token in [
+    "SOURCE_FORMAT_REVISION = 2",
+    '"numeric_preflattening"',
+    '"level_palette"',
+    'if parts[-2].lower() != "region":',
+]:
+    if token not in legacy:
+        error(f"Patch 019 source-format invariant missing: {token}")
+
 for forbidden in [
     "setSectionResizeMode(0, QHeaderView.Stretch)",
     "setSectionResizeMode(1, QHeaderView.Stretch)",
@@ -853,6 +874,8 @@ for token in [
     "QWidget#backportScrollViewport",
     "QWidget#backportScrollBody",
     "background: #11151b",
+    "QDialog, QMessageBox { background: #171d25; color: #e7edf5; }",
+    "QMessageBox QLabel { background: transparent; color: #e7edf5; }",
 ]:
     if token not in theme:
         error(f"Packaged UI theme invariant missing: {token}")

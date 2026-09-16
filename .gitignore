@@ -98,3 +98,6 @@ $RECYCLE.BIN/
 *.bak
 *.swp
 *~
+
+# Local patch installer backups
+.wgmap-patch-backups/
