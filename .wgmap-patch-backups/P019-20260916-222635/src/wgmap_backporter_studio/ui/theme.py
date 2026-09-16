@@ -8,10 +8,6 @@ QLabel { color: #e7edf5; }
 QLabel#muted { color: #9ca9b8; }
 QLabel#pageTitle { font-size: 24px; font-weight: 700; }
 QLabel#sectionTitle { font-size: 16px; font-weight: 650; }
-
-QDialog, QMessageBox { background: #171d25; color: #e7edf5; }
-QMessageBox QLabel { background: transparent; color: #e7edf5; }
-QMessageBox QPushButton { min-width: 72px; }
 QFrame#card, QGroupBox {
     background: #171d25;
     border: 1px solid #27313d;

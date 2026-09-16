@@ -6,7 +6,7 @@
 [![Dev Build](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/build-dev.yml/badge.svg?branch=dev)](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/build-dev.yml)
 [![Community Release](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/release-community.yml/badge.svg?branch=main)](https://github.com/RhysHopkins04/Minecraft-Map-Backporter-Studio/actions/workflows/release-community.yml)
 
-**Current version:** `0.4.2`
+**Current version:** `0.4.1`
 **Current conversion writer:** modern Java Anvil → Forge/Minecraft **1.7.10**
 **Desktop targets:** macOS **Apple Silicon** and Windows **x64**
 
@@ -16,11 +16,11 @@ WG Map Backporter Studio is being developed as a reusable Minecraft world-conver
 
 ### Map Backporter
 
-The current working backend converts Minecraft Java Anvil source worlds into legacy Forge/Minecraft 1.7.10 chunk storage. The source reader covers the stable storage families used across Minecraft 1.8 through the current 1.21-era: pre-flattening numeric `Blocks`/`Data` sections, 1.13-1.17 `Level`-wrapped palette sections, and 1.18+ root-level palette sections.
+The current working backend converts modern palette-based Minecraft Java Anvil chunks into legacy Forge/Minecraft 1.7.10 chunk storage.
 
 It can:
 
-- read a world folder, `region` folder, ZIP, or individual `.mca` file, while selecting terrain `region/` data separately from same-named `entities/` and `poi/` region files,
+- read a world folder, `region` folder, ZIP, or individual `.mca` file,
 - stage a clone of a real 1.7.10 Forge target/template world and only promote it after successful conversion/verification,
 - resolve the target world's persisted Forge/FML registry instead of hard-coding mod numeric IDs,
 - write legacy `Blocks`, `Data`, and `Add` arrays,

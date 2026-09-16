@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wg-map-backporter-studio"
-version = "0.4.2"
+version = "0.4.1"
 description = "Cross-platform desktop toolkit for Minecraft Java map backporting, mod analysis, and reusable block mappings"
 requires-python = ">=3.11"
 dependencies = [
