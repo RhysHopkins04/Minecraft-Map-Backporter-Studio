@@ -2,9 +2,8 @@
 """
 WG Modern -> Minecraft 1.7.10 Surface/Map Backporter
 
-Designed for Java Anvil source chunks spanning the 1.8 pre-flattening numeric
-format, the 1.13-1.17 Level-wrapped palette format, and the 1.18+ root palette
-format, with Forge 1.7.10 target worlds. It clones a target/template 1.7.10 world,
+Designed for modern Java Anvil chunks (tested against DataVersion 3465 / 1.20.1-era
+chunks) and Forge 1.7.10 target worlds. It clones a target/template 1.7.10 world,
 uses that world's FML registry to resolve numeric block IDs (including HBM), then
 writes legacy 1.7.10 Anvil chunks.
 
@@ -40,8 +39,7 @@ try:
 except Exception:
     np = None
 
-TOOL_VERSION = "0.2.3"
-SOURCE_FORMAT_REVISION = 2
+TOOL_VERSION = "0.2.2"
 AIR_NAMES = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
 
 # Patch 013 keeps conversion correctness conservative: terrain/block states are
@@ -464,26 +462,8 @@ def parse_biomes(r: Reader):
     return palette,data
 
 
-def _parse_palette_list(r: Reader):
-    et=r.u8(); n=r.i32()
-    if et != 10:
-        for _ in range(n): skip_payload(r,et)
-        return []
-    return [parse_block_palette_entry(r) for _ in range(n)]
-
-
 def parse_section(r: Reader):
-    """Parse one source section across the three Java-Anvil storage eras.
-
-    * 1.18+ stores ``block_states``/``biomes`` compounds in lowercase.
-    * 1.13-1.17 stores ``Palette``/``BlockStates`` directly on each section.
-    * 1.8-1.12 stores numeric ``Blocks`` + nibble ``Data`` (+ optional ``Add``).
-
-    The returned shape is deliberately normalized so later conversion logic can
-    choose the appropriate decoder without caring about the original NBT casing.
-    """
     y=None; bp=[]; bd=None; biop=[]; biod=None; skylight=None; blocklight=None
-    legacy_blocks=None; legacy_data=None; legacy_add=None
     while True:
         t=r.u8()
         if t == 0: break
@@ -491,16 +471,6 @@ def parse_section(r: Reader):
         if k == "Y" and t == 1: y=r.i8()
         elif k == "block_states" and t == 10: bp,bd=parse_block_states(r)
         elif k == "biomes" and t == 10: biop,biod=parse_biomes(r)
-        elif k == "Palette" and t == 9:
-            bp=_parse_palette_list(r)
-        elif k == "BlockStates" and t == 12:
-            n=r.i32(); bd=[r.i64() for _ in range(n)]
-        elif k == "Blocks" and t == 7:
-            legacy_blocks=read_payload(r,7)
-        elif k == "Data" and t == 7:
-            legacy_data=read_payload(r,7)
-        elif k == "Add" and t == 7:
-            legacy_add=read_payload(r,7)
         elif k == "SkyLight" and t == 7:
             skylight=read_payload(r,7)
         elif k == "BlockLight" and t == 7:
@@ -509,308 +479,62 @@ def parse_section(r: Reader):
     return {
         "Y":y, "palette":bp, "data":bd, "biome_palette":biop, "biome_data":biod,
         "SkyLight":skylight, "BlockLight":blocklight,
-        "legacy_blocks":legacy_blocks, "legacy_data":legacy_data, "legacy_add":legacy_add,
     }
 
 
-def _parse_section_list(r: Reader):
-    et=r.u8(); n=r.i32()
-    if et == 10:
-        return [parse_section(r) for _ in range(n)]
-    for _ in range(n): skip_payload(r,et)
-    return []
-
-
-def _parse_compound_list(r: Reader):
-    et=r.u8(); n=r.i32()
-    if et == 10:
-        return [read_payload(r,10) for _ in range(n)]
-    for _ in range(n): skip_payload(r,et)
-    return []
-
-
-def _parse_chunk_fields(r: Reader, out, *, stop_at_end=True):
-    """Parse either the root payload (1.18+) or the nested Level payload (<=1.17)."""
+def parse_modern_chunk(raw: bytes):
+    r=Reader(raw); rt=r.u8(); r.string()
+    if rt != 10: raise ConversionError("Modern chunk root is not a compound")
+    out={
+        "xPos":None,"zPos":None,"LastUpdate":0,"DataVersion":None,
+        "sections":[],"block_entities":[],"isLightOn":None,
+    }
     while True:
         t=r.u8()
-        if t == 0:
-            break
+        if t == 0: break
         k=r.string()
         if k == "xPos" and t == 3: out["xPos"]=r.i32()
         elif k == "zPos" and t == 3: out["zPos"]=r.i32()
         elif k == "LastUpdate" and t == 4: out["LastUpdate"]=r.i64()
         elif k == "DataVersion" and t == 3: out["DataVersion"]=r.i32()
         elif k == "isLightOn" and t == 1: out["isLightOn"]=bool(r.i8())
-        elif k in {"sections","Sections"} and t == 9:
-            out["sections"]=_parse_section_list(r)
-        elif k in {"block_entities","TileEntities"} and t == 9:
-            out["block_entities"]=_parse_compound_list(r)
-        elif k in {"entities","Entities"} and t == 9:
-            out["entities_in_chunk_present"]=True
-            out["entities"]=_parse_compound_list(r)
-        elif k == "Biomes" and t in {7,11}:
-            out["legacy_biomes"]=read_payload(r,t)
-        elif k == "Level" and t == 10:
-            out["source_layout"]="level_wrapped"
-            _parse_chunk_fields(r,out)
-        else:
-            skip_payload(r,t)
+        elif k == "sections" and t == 9:
+            et=r.u8(); n=r.i32()
+            if et == 10: out["sections"]=[parse_section(r) for _ in range(n)]
+            else:
+                for _ in range(n): skip_payload(r,et)
+        elif k == "block_entities" and t == 9:
+            et=r.u8(); n=r.i32()
+            if et == 10:
+                out["block_entities"]=[read_payload(r,10) for _ in range(n)]
+            else:
+                for _ in range(n): skip_payload(r,et)
+        else: skip_payload(r,t)
     return out
 
 
-def parse_modern_chunk(raw: bytes):
-    """Read Java Edition Anvil chunk NBT from 1.8 through current 1.21-era layouts.
-
-    The old function name is retained because it is used throughout the engine,
-    but this is now a source-version normalizer rather than a post-1.18-only
-    reader.
-    """
-    r=Reader(raw); rt=r.u8(); r.string()
-    if rt != 10: raise ConversionError("Source chunk root is not a compound")
-    out={
-        "xPos":None,"zPos":None,"LastUpdate":0,"DataVersion":None,
-        "sections":[],"block_entities":[],"entities":[],"entities_in_chunk_present":False,"isLightOn":None,
-        "legacy_biomes":None,"source_layout":"root",
-    }
-    _parse_chunk_fields(r,out)
-    if any(s.get("legacy_blocks") is not None for s in out["sections"]):
-        out["source_section_format"]="numeric_preflattening"
-    elif out["source_layout"] == "level_wrapped":
-        out["source_section_format"]="level_palette"
-    else:
-        out["source_section_format"]="root_palette"
-    return out
-
-
-def _palette_uses_padded_longs(data_version):
-    # Java 1.16 changed section palette packing so entries no longer straddle
-    # 64-bit boundaries. Stable 1.16 is DataVersion 2566; earlier flattened
-    # worlds (1.13-1.15.2) use the continuous bit-stream layout.
-    try:
-        return int(data_version or 0) >= 2566
-    except Exception:
-        return True
-
-def unpack_palette_indices(data, palette_size, count, min_bits, *, padded=True):
+def unpack_palette_indices(data, palette_size, count, min_bits):
     if np is None: raise ConversionError("NumPy is required. Install with: python3 -m pip install numpy")
     if palette_size <= 1 or not data:
         return np.zeros(count, dtype=np.int32)
     bits=max(min_bits, (palette_size-1).bit_length())
+    vpl=64//bits
     mask=(1<<bits)-1
+    # Convert signed NBT longs to uint64 without overflow warnings.
     arr=np.fromiter(((v & 0xFFFFFFFFFFFFFFFF) for v in data), dtype=np.uint64, count=len(data))
     out=np.zeros(count, dtype=np.int32)
-    if padded:
-        vpl=64//bits
-        for slot in range(vpl):
-            dest=np.arange(slot, count, vpl)
-            if len(dest)==0: continue
-            src=np.arange(len(dest))
-            valid=src < len(arr)
-            if not np.any(valid): continue
-            vals=((arr[src[valid]] >> np.uint64(slot*bits)) & np.uint64(mask)).astype(np.int32)
-            out[dest[valid]]=vals
-    else:
-        # 1.13-1.15.2: palette entries form one continuous bit stream and may
-        # cross a long boundary.
-        for i in range(count):
-            bit=i*bits; li=bit>>6; off=bit&63
-            if li >= len(arr): break
-            value=int(arr[li] >> np.uint64(off))
-            spill=off+bits-64
-            if spill > 0 and li+1 < len(arr):
-                value |= int(arr[li+1] << np.uint64(bits-spill))
-            out[i]=value & mask
+    for slot in range(vpl):
+        dest=np.arange(slot, count, vpl)
+        if len(dest)==0: continue
+        src=np.arange(len(dest))
+        valid=src < len(arr)
+        if not np.any(valid): continue
+        vals=((arr[src[valid]] >> np.uint64(slot*bits)) & np.uint64(mask)).astype(np.int32)
+        out[dest[valid]]=vals
+    # Corrupt/out-of-range palette indexes should not crash the whole map.
     out[(out < 0) | (out >= palette_size)] = 0
     return out
 
-
-
-PRE_FLATTEN_ADDED_BLOCKS = {
-    165:"slime_block",166:"barrier",167:"iron_trapdoor",168:"prismarine",169:"sea_lantern",
-    170:"hay_block",171:"carpet",172:"hardened_clay",173:"coal_block",174:"packed_ice",175:"double_plant",
-    176:"standing_banner",177:"wall_banner",178:"daylight_detector_inverted",179:"red_sandstone",
-    180:"red_sandstone_stairs",181:"double_stone_slab2",182:"stone_slab2",
-    183:"spruce_fence_gate",184:"birch_fence_gate",185:"jungle_fence_gate",186:"dark_oak_fence_gate",187:"acacia_fence_gate",
-    188:"spruce_fence",189:"birch_fence",190:"jungle_fence",191:"dark_oak_fence",192:"acacia_fence",
-    193:"spruce_door",194:"birch_door",195:"jungle_door",196:"acacia_door",197:"dark_oak_door",
-    198:"end_rod",199:"chorus_plant",200:"chorus_flower",201:"purpur_block",202:"purpur_pillar",
-    203:"purpur_stairs",204:"purpur_double_slab",205:"purpur_slab",206:"end_bricks",207:"beetroots",
-    208:"grass_path",209:"end_gateway",210:"repeating_command_block",211:"chain_command_block",
-    212:"frosted_ice",213:"magma",214:"nether_wart_block",215:"red_nether_brick",216:"bone_block",
-    217:"structure_void",218:"observer",251:"concrete",252:"concrete_powder",255:"structure_block",
-}
-
-_PRE_COLORS=("white","orange","magenta","light_blue","yellow","lime","pink","gray","light_gray","cyan","purple","blue","brown","green","red","black")
-for _i,_color in enumerate(_PRE_COLORS):
-    PRE_FLATTEN_ADDED_BLOCKS[219+_i]=_color+"_shulker_box"
-    PRE_FLATTEN_ADDED_BLOCKS[235+_i]=_color+"_glazed_terracotta"
-
-
-def _target_vanilla_name_for_numeric_id(reg, block_id):
-    cache=getattr(reg,"_vanilla_name_by_numeric_id",None)
-    if cache is None:
-        cache={}
-        for name,value in reg.ids.items():
-            low=str(name).lower()
-            if low.startswith("minecraft:"):
-                cache.setdefault(int(value),str(name))
-        reg._vanilla_name_by_numeric_id=cache
-    return cache.get(int(block_id))
-
-
-def _legacy_horizontal_stair_props(meta):
-    return {
-        "facing":("east","west","south","north")[int(meta)&3],
-        "half":"top" if int(meta)&4 else "bottom",
-        "shape":"straight",
-    }
-
-
-def _legacy_trapdoor_props(meta):
-    return {
-        "facing":("north","south","west","east")[int(meta)&3],
-        "open":"true" if int(meta)&4 else "false",
-        "half":"top" if int(meta)&8 else "bottom",
-    }
-
-
-def _legacy_gate_props(meta):
-    return {
-        "facing":("south","west","north","east")[int(meta)&3],
-        "open":"true" if int(meta)&4 else "false",
-        "powered":"true" if int(meta)&8 else "false",
-    }
-
-
-def _legacy_door_props(meta):
-    meta=int(meta)&15
-    if meta&8:
-        return {"half":"upper","hinge":"right" if meta&1 else "left","powered":"true" if meta&2 else "false"}
-    return {
-        "half":"lower","facing":("east","south","west","north")[meta&3],
-        "open":"true" if meta&4 else "false",
-    }
-
-
-def _legacy_axis(meta):
-    return {0:"y",4:"x",8:"z"}.get(int(meta)&12,"y")
-
-
-def _preflatten_to_modern_state(block_id, meta):
-    """Translate only blocks added after the 1.7.10 vanilla registry.
-
-    Blocks that already exist in the selected 1.7.10 template bypass this table
-    entirely and preserve their original numeric ID + metadata verbatim.
-    """
-    block_id=int(block_id); meta=int(meta)&15
-    old=PRE_FLATTEN_ADDED_BLOCKS.get(block_id)
-    if old is None:
-        return None,None
-    if old == "slime_block": return "minecraft:slime_block",{}
-    if old == "barrier": return "minecraft:barrier",{}
-    if old == "iron_trapdoor": return "minecraft:iron_trapdoor",_legacy_trapdoor_props(meta)
-    if old == "prismarine":
-        return "minecraft:"+({1:"prismarine_bricks",2:"dark_prismarine"}.get(meta&3,"prismarine")),{}
-    if old == "sea_lantern": return "minecraft:sea_lantern",{}
-    if old == "hay_block": return "minecraft:hay_block",{"axis":_legacy_axis(meta)}
-    if old == "carpet": return "minecraft:"+_PRE_COLORS[meta&15]+"_carpet",{}
-    if old == "hardened_clay": return "minecraft:terracotta",{}
-    if old == "coal_block": return "minecraft:coal_block",{}
-    if old == "packed_ice": return "minecraft:packed_ice",{}
-    if old == "double_plant":
-        names=("sunflower","lilac","tall_grass","large_fern","rose_bush","peony")
-        return "minecraft:"+names[min(meta&7,5)],{"half":"upper" if meta&8 else "lower"}
-    if old == "standing_banner": return "minecraft:white_banner",{"rotation":str(meta&15)}
-    if old == "wall_banner":
-        return "minecraft:white_wall_banner",{"facing":{2:"north",3:"south",4:"west",5:"east"}.get(meta,"north")}
-    if old == "daylight_detector_inverted": return "minecraft:daylight_detector",{"power":str(meta&15)}
-    if old == "red_sandstone":
-        return "minecraft:"+({1:"chiseled_red_sandstone",2:"smooth_red_sandstone"}.get(meta&3,"red_sandstone")),{}
-    if old == "red_sandstone_stairs": return "minecraft:red_sandstone_stairs",_legacy_horizontal_stair_props(meta)
-    if old == "double_stone_slab2": return "minecraft:red_sandstone_slab",{"type":"double"}
-    if old == "stone_slab2": return "minecraft:red_sandstone_slab",{"type":"top" if meta&8 else "bottom"}
-    if old.endswith("_fence_gate"): return "minecraft:"+old,_legacy_gate_props(meta)
-    if old.endswith("_fence"): return "minecraft:"+old,{}
-    if old.endswith("_door"): return "minecraft:"+old,_legacy_door_props(meta)
-    if old == "end_rod":
-        return "minecraft:end_rod",{"facing":("down","up","north","south","west","east")[min(meta,5)]}
-    if old == "chorus_plant": return "minecraft:chorus_plant",{}
-    if old == "chorus_flower": return "minecraft:chorus_flower",{"age":str(min(meta,5))}
-    if old == "purpur_block": return "minecraft:purpur_block",{}
-    if old == "purpur_pillar": return "minecraft:purpur_pillar",{"axis":_legacy_axis(meta)}
-    if old == "purpur_stairs": return "minecraft:purpur_stairs",_legacy_horizontal_stair_props(meta)
-    if old == "purpur_double_slab": return "minecraft:purpur_slab",{"type":"double"}
-    if old == "purpur_slab": return "minecraft:purpur_slab",{"type":"top" if meta&8 else "bottom"}
-    if old == "end_bricks": return "minecraft:end_stone_bricks",{}
-    if old == "beetroots": return "minecraft:beetroots",{"age":str(min(meta,3))}
-    if old == "grass_path": return "minecraft:dirt_path",{}
-    if old == "end_gateway": return "minecraft:end_gateway",{}
-    if old in {"repeating_command_block","chain_command_block"}: return "minecraft:"+old,{}
-    if old == "frosted_ice": return "minecraft:frosted_ice",{"age":str(min(meta,3))}
-    if old == "magma": return "minecraft:magma_block",{}
-    if old == "nether_wart_block": return "minecraft:nether_wart_block",{}
-    if old == "red_nether_brick": return "minecraft:red_nether_bricks",{}
-    if old == "bone_block": return "minecraft:bone_block",{"axis":_legacy_axis(meta)}
-    if old == "structure_void": return "minecraft:structure_void",{}
-    if old == "observer":
-        return "minecraft:observer",{"facing":("down","up","north","south","west","east")[min(meta&7,5)],"powered":"true" if meta&8 else "false"}
-    if old.endswith("_shulker_box"):
-        return "minecraft:"+old,{"facing":("down","up","north","south","west","east")[min(meta&7,5)]}
-    if old.endswith("_glazed_terracotta"): return "minecraft:"+old,{}
-    if old == "concrete": return "minecraft:"+_PRE_COLORS[meta&15]+"_concrete",{}
-    if old == "concrete_powder": return "minecraft:"+_PRE_COLORS[meta&15]+"_concrete_powder",{}
-    if old == "structure_block": return "minecraft:structure_block",{}
-    return "minecraft:"+old,{}
-
-
-def _source_section_states(section, data_version):
-    """Return normalized source states plus one state index per 4096 blocks."""
-    pal=section.get("palette") or []
-    if pal:
-        inds=unpack_palette_indices(
-            section.get("data"),len(pal),4096,4,
-            padded=_palette_uses_padded_longs(data_version),
-        )
-        return [
-            {"kind":"palette","name":str(name),"props":dict(props or {})}
-            for name,props in pal
-        ],inds
-    raw=section.get("legacy_blocks")
-    if raw is None:
-        return [],np.zeros(4096,dtype=np.int32)
-    block_bytes=np.frombuffer(bytes(raw),dtype=np.uint8)
-    ids=np.zeros(4096,dtype=np.uint16)
-    ids[:min(4096,len(block_bytes))]=block_bytes[:4096]
-    add=unpack_nibbles(section.get("legacy_add"),4096)
-    ids |= add.astype(np.uint16)<<8
-    metas=unpack_nibbles(section.get("legacy_data"),4096)
-    codes=(ids.astype(np.uint32)<<4)|metas.astype(np.uint32)
-    unique,inverse=np.unique(codes,return_inverse=True)
-    states=[{"kind":"legacy_numeric","legacy_id":int(code>>4),"legacy_meta":int(code&15)} for code in unique.tolist()]
-    return states,inverse.astype(np.int32)
-
-
-def _map_source_state(state, reg, use_hbm, mapping_profile):
-    if state.get("kind") == "palette":
-        name=state["name"]; props=state.get("props") or {}
-        mp=map_modern(name,props,reg,use_hbm,mapping_profile)
-        rid,meta,resolved=resolve_mapping(mp,reg)
-        return mp,rid,meta,resolved,name,props
-
-    source_id=int(state.get("legacy_id",0)); source_meta=int(state.get("legacy_meta",0))&15
-    direct_name=_target_vanilla_name_for_numeric_id(reg,source_id)
-    if direct_name is not None:
-        mp=Mapping(direct_name,source_meta,"exact","Pre-flattening vanilla numeric ID/metadata preserved directly")
-        return mp,source_id,source_meta,direct_name,direct_name,({"legacy_meta":str(source_meta)} if source_meta else {})
-    name,props=_preflatten_to_modern_state(source_id,source_meta)
-    if name is None:
-        air=reg.resolve("minecraft:air")
-        if air is None: raise ConversionError("Target registry missing minecraft:air")
-        mp=Mapping("minecraft:air",0,"omitted","Unknown pre-flattening numeric block ID %d omitted"%source_id)
-        return mp,air,0,"minecraft:air","legacy:%d:%d"%(source_id,source_meta),{}
-    mp=map_modern(name,props,reg,use_hbm,mapping_profile)
-    rid,target_meta,resolved=resolve_mapping(mp,reg)
-    return mp,rid,target_meta,resolved,name,props
 
 def pack_nibbles(vals):
     vals=np.asarray(vals,dtype=np.uint8).reshape(-1)
@@ -2282,16 +2006,11 @@ def preflight_source_mappings(
                             block_entity_types["<malformed>"]+=1
                     chunk_high=False; chunk_low=False
                     for section in c["sections"]:
-                        sy=section.get("Y")
-                        if sy is None: continue
-                        states,inds=_source_section_states(section,c.get("DataVersion"))
-                        if not states: continue
+                        sy=section.get("Y"); palette=section.get("palette") or []
+                        if sy is None or not palette: continue
                         source_ymin=min(source_ymin,sy); source_ymax=max(source_ymax,sy)
                         target_base=sy*16+y_offset
-                        has_non_air=any(
-                            (st.get("legacy_id",0) != 0) if st.get("kind")=="legacy_numeric" else st.get("name") not in AIR_NAMES
-                            for st in states
-                        )
+                        has_non_air=any(name not in AIR_NAMES for name,_ in palette)
                         if target_base>255 or target_base+15<0:
                             if has_non_air:
                                 if target_base>255: chunk_high=True
@@ -2299,15 +2018,10 @@ def preflight_source_mappings(
                             continue
 
                         inrange_ymin=min(inrange_ymin,sy); inrange_ymax=max(inrange_ymax,sy)
-                        occurrence_counts=np.bincount(inds,minlength=len(states)) if len(states) else np.zeros(0,dtype=np.int64)
-                        for state_index,state in enumerate(states):
-                            if state.get("kind")=="palette":
-                                name=state["name"]; props=state.get("props") or {}
-                                sig=_palette_signature(name,props)
-                            else:
-                                props={}
-                                name="legacy:%d:%d"%(state.get("legacy_id",0),state.get("legacy_meta",0))
-                                sig=("legacy_numeric",int(state.get("legacy_id",0)),int(state.get("legacy_meta",0)))
+                        inds=unpack_palette_indices(section.get("data"),len(palette),4096,4)
+                        occurrence_counts=np.bincount(inds,minlength=len(palette)) if len(palette) else np.zeros(0,dtype=np.int64)
+                        for palette_index,(name,props) in enumerate(palette):
+                            sig=_palette_signature(name,props)
                             if sig not in unique:
                                 unique.add(sig)
                                 if props:
@@ -2315,12 +2029,11 @@ def preflight_source_mappings(
                                     for prop_key in props:
                                         property_keys[str(prop_key)]+=1
                                 try:
-                                    mapping,_rid,_meta,resolved,source_name,source_props=_map_source_state(
-                                        state,reg,use_hbm,mapping_profile
-                                    )
-                                    mapping_cache[sig]=(mapping,resolved,source_name,source_props)
+                                    mapping=map_modern(name,props,reg,use_hbm,mapping_profile)
+                                    _,_,resolved=resolve_mapping(mapping,reg)
+                                    mapping_cache[sig]=(mapping,resolved)
                                     mapped_targets[resolved]+=1
-                                    mapping_quality[mapping.quality].add(str(source_name))
+                                    mapping_quality[mapping.quality].add(str(name))
                                     if ":" in resolved and not resolved.lower().startswith("minecraft:"):
                                         mod_targets[resolved]+=1
                                 except Exception as exc:
@@ -2330,26 +2043,26 @@ def preflight_source_mappings(
                                     })
                             cached=mapping_cache.get(sig)
                             if cached is not None:
-                                mapping,resolved,source_name,source_props=cached
-                                count=int(occurrence_counts[state_index]) if state_index < len(occurrence_counts) else 0
-                                is_air=(state.get("legacy_id",-1)==0) if state.get("kind")=="legacy_numeric" else str(state.get("name")) in AIR_NAMES
-                                if count and not is_air:
+                                mapping,resolved=cached
+                                count=int(occurrence_counts[palette_index]) if palette_index < len(occurrence_counts) else 0
+                                if count and str(name) not in AIR_NAMES:
                                     block_occurrences_total+=count
-                                    source_occurrences[str(source_name)]+=count
+                                    source_occurrences[str(name)]+=count
                                     quality_occurrences[mapping.quality]+=count
-                                    if source_props:
+                                    if props:
                                         stateful_occurrences_total+=count
                                         if mapping.quality in {"exact","backport_exact"}:
                                             stateful_preserved_occurrences+=count
-                                    mapping_impact[(str(source_name),str(resolved),str(mapping.quality),str(mapping.note or ""))]+=count
+                                    mapping_impact[(str(name),str(resolved),str(mapping.quality),str(mapping.note or ""))]+=count
                                     if mapping_profile is not None and mapping_profile.allow_safe_mod_replacements and mapping.quality not in {"backport_exact","backport_close"}:
-                                        vanilla_name=str(source_name) if ":" in str(source_name) else "minecraft:"+str(source_name)
+                                        source_name=str(name)
+                                        vanilla_name=source_name if ":" in source_name else "minecraft:"+source_name
                                         if vanilla_name.lower().startswith("minecraft:") and reg.resolve(vanilla_name) is None:
                                             candidates=[c for c in mapping_profile.backport_candidates(vanilla_name) if mapping_profile.allows_namespace(c.target_name.split(":",1)[0] if ":" in c.target_name else "")]
                                             if candidates and not any(reg.resolve(c.target_name) is not None for c in candidates):
                                                 targets=" | ".join(c.target_name for c in candidates)
                                                 providers=" | ".join(c.provider or c.target_name.split(":",1)[0] for c in candidates)
-                                                unavailable_provider_impact[(str(source_name),targets,providers)]+=count
+                                                unavailable_provider_impact[(source_name,targets,providers)]+=count
                     if chunk_high: crop_high_chunks+=1
                     if chunk_low: crop_low_chunks+=1
                 except Exception as exc:
@@ -2594,21 +2307,12 @@ def _validated_light_array(value):
         return bytes(value)
     return None
 
-def unpack_nibbles(data, count=None):
-    if not data:
-        return np.zeros(int(count or 0),dtype=np.uint8)
+def unpack_nibbles(data):
     raw=np.frombuffer(bytes(data),dtype=np.uint8)
     out=np.empty(raw.size*2,dtype=np.uint8)
     out[0::2]=raw & 15
     out[1::2]=(raw >> 4) & 15
-    if count is None:
-        return out
-    count=int(count)
-    if out.size >= count:
-        return out[:count]
-    padded=np.zeros(count,dtype=np.uint8)
-    padded[:out.size]=out
-    return padded
+    return out
 
 def derive_heightmap_from_skylight(section_skylight, fallback_height):
     """Derive the 1.7.10 skylight height boundary from translated source light.
@@ -2779,47 +2483,23 @@ def verify_written_region(path: Path, expected_chunks):
     return len(seen)
 
 
-def _legacy_biome_id(value):
-    try: value=int(value)
-    except Exception: return 1
-    # IDs shared by 1.7.10 and later registries can be retained directly. Newer
-    # biome IDs outside the old registry fall back to plains rather than risking
-    # a target-side unknown-biome lookup.
-    return value if 0 <= value <= 39 else 1
-
-
-def choose_biomes(chunk):
-    sections=chunk.get("sections") or []
-    # 1.18+: per-section named biome palettes.
+def choose_biomes(sections):
+    # Prefer a section near old sea level; fallback to the nearest section with biome data.
     candidates=[s for s in sections if s.get("biome_palette")]
-    if candidates:
-        sec=min(candidates,key=lambda s:abs((s.get("Y") or 0)-4))
-        pal=sec["biome_palette"]; dat=sec.get("biome_data")
-        inds=unpack_palette_indices(dat,len(pal),64,1,padded=True)
-        out=[]
-        for z in range(16):
-            for x in range(16):
-                idx=(0*16)+((z>>2)*4)+(x>>2)
-                pi=int(inds[idx]) if idx<len(inds) else 0
-                b=pal[pi] if 0<=pi<len(pal) else "minecraft:plains"
-                out.append(MODERN_BIOME_TO_1710.get(b,1))
-        return out
+    if not candidates: return [1]*256
+    sec=min(candidates,key=lambda s:abs((s.get("Y") or 0)-4))
+    pal=sec["biome_palette"]; dat=sec.get("biome_data")
+    inds=unpack_palette_indices(dat,len(pal),64,1)
+    out=[]
+    # Sample biome y-cell 0 around section base; x/z are 4-block resolution.
+    for z in range(16):
+        for x in range(16):
+            idx=(0*16)+((z>>2)*4)+(x>>2)
+            pi=int(inds[idx]) if idx<len(inds) else 0
+            b=pal[pi] if 0<=pi<len(pal) else "minecraft:plains"
+            out.append(MODERN_BIOME_TO_1710.get(b,1))
+    return out
 
-    # 1.8-1.17: chunk-level Biomes array. Older worlds use 256 bytes/ints; 1.15+
-    # uses 4x4x64 (=1024) integer samples. Sample around old sea level (Y~64).
-    legacy=chunk.get("legacy_biomes")
-    if legacy is not None:
-        vals=list(legacy)
-        if len(vals) == 256:
-            return [_legacy_biome_id(v) for v in vals]
-        if len(vals) >= 1024:
-            out=[]; yq=16
-            for z in range(16):
-                for x in range(16):
-                    idx=(yq*16)+((z>>2)*4)+(x>>2)
-                    out.append(_legacy_biome_id(vals[idx] if idx < len(vals) else 1))
-            return out
-    return [1]*256
 
 def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_profile: MappingProfile | None = None):
     c=parse_modern_chunk(raw)
@@ -2845,16 +2525,11 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
     # First pass: convert every source section that intersects legacy 0..255 after offset.
     for s in c["sections"]:
         sy=s.get("Y")
-        if sy is None: continue
-        states,inds=_source_section_states(s,c.get("DataVersion"))
-        if not states: continue
+        pal=s.get("palette") or []
+        if sy is None or not pal: continue
         target_base=sy*16+y_offset
         if target_base>255 or target_base+15<0:
-            has_non_air=any(
-                (st.get("legacy_id",0) != 0) if st.get("kind")=="legacy_numeric" else st.get("name") not in AIR_NAMES
-                for st in states
-            )
-            if has_non_air:
+            if any(n not in AIR_NAMES for n,_ in pal):
                 if target_base>255: high_crop=True
                 else: low_crop=True
             continue
@@ -2863,23 +2538,22 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
             raise ConversionError("Vertical offset must be a multiple of 16 in this build")
         ty=sy+(y_offset//16)
         if not (0<=ty<=15): continue
+        inds=unpack_palette_indices(s.get("data"),len(pal),4096,4)
         mids=[]; mmeta=[]; state_te_specs={}
-        for state_index,state in enumerate(states):
-            mp,rid,meta,resolved,source_name,props=_map_source_state(
-                state,reg,use_hbm,mapping_profile
-            )
+        for palette_index,(name,props) in enumerate(pal):
+            mp=map_modern(name,props,reg,use_hbm,mapping_profile)
+            rid,meta,resolved=resolve_mapping(mp,reg)
             mids.append(rid); mmeta.append(meta)
             resolved_lower=str(resolved).lower()
-            source_path=str(source_name).split(":",1)[-1].lower()
             if resolved_lower in {
                 "etfuturum:glow_lichen","etfuturum:beehive","etfuturum:bee_nest",
                 "etfuturum:barrel","etfuturum:blast_furnace","etfuturum:lit_blast_furnace",
                 "etfuturum:smoker","etfuturum:lit_smoker","etfuturum:campfire","etfuturum:soul_campfire",
                 "etfuturum:banner","etfuturum:shulker_box","etfuturum:cave_vine",
-            } or (resolved_lower == "minecraft:flower_pot" and source_path in FLOWER_POT_CONTENTS) \
+            } or (resolved_lower == "minecraft:flower_pot" and str(name).split(":",1)[-1].lower() in FLOWER_POT_CONTENTS) \
                or (resolved_lower.startswith("etfuturum:") and resolved_lower.endswith("copper_chest")):
-                state_te_specs[state_index]=(source_path,dict(props or {}),str(resolved))
-            key=str(source_name)
+                state_te_specs[palette_index]=(str(name).split(":",1)[-1],dict(props or {}),str(resolved))
+            key=name
             stats["palette_seen"][key]+=1
             stats["mapping_quality"][mp.quality].add(key)
             if mp.quality in {"approximate","omitted"}:
@@ -2898,8 +2572,8 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
         # Some EFR state cannot live in four metadata bits at all (glow lichen),
         # while a few EFR container blocks require a minimal TileEntity to exist
         # after a raw Anvil import. Synthesize only those narrowly verified TEs.
-        for state_index,(source_path,props,resolved) in state_te_specs.items():
-            flats=np.flatnonzero(inds == state_index)
+        for palette_index,(source_path,props,resolved) in state_te_specs.items():
+            flats=np.flatnonzero(inds == palette_index)
             for flat in flats.tolist():
                 ly=int(flat)//256
                 rem=int(flat)%256
@@ -2991,7 +2665,7 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
     stats["lighting_emitted_sections"]+=lighting_emitted_sections
     legacy_height=derive_heightmap_from_skylight(section_skylight,height).reshape(-1).tolist()
 
-    biomes=choose_biomes(c)
+    biomes=choose_biomes(c["sections"])
     legacy=make_chunk_nbt(
         cx,cz,c.get("LastUpdate",0),converted,legacy_height,biomes,
         tile_entities=state_tile_entities,
@@ -3009,40 +2683,14 @@ def discover_source_regions(source: Path, tempdir: Path):
     if source.is_file() and source.suffix.lower()==".zip":
         out=tempdir/"source_region"; out.mkdir(parents=True,exist_ok=True)
         with zipfile.ZipFile(source) as z:
-            # A full Java world ZIP can contain terrain, entity and POI region
-            # files with identical r.X.Z.mca basenames. Only the overworld's
-            # immediate ``region/`` directory is terrain. The old broad regex
-            # admitted entities/ and poi/ too, so later entries silently
-            # overwrote the actual terrain files.
-            structured=[]; bare=[]
+            found=0
             for info in z.infolist():
-                if info.is_dir(): continue
-                norm=info.filename.replace("\\","/").strip("/")
-                parts=[x for x in norm.split("/") if x]
-                if not parts or not re.fullmatch(r"r\.-?\d+\.-?\d+\.mca",parts[-1],re.I):
-                    continue
-                if len(parts)==1:
-                    bare.append(info); continue
-                if parts[-2].lower() != "region":
-                    continue
-                ancestors={x.lower() for x in parts[:-2]}
-                if "dim-1" in ancestors or "dim1" in ancestors or "dimensions" in ancestors:
-                    continue
-                structured.append(info)
-            chosen=structured if structured else bare
-            if not chosen:
-                raise ConversionError("ZIP contains no overworld terrain region/*.mca files")
-            seen=set()
-            for info in chosen:
-                name=Path(info.filename).name
-                if name in seen:
-                    raise ConversionError(
-                        "ZIP contains duplicate overworld terrain region name %s; extract/select the intended world folder instead"%name
-                    )
-                seen.add(name)
-                dest=out/name
-                with z.open(info) as fi, dest.open("wb") as fo:
-                    shutil.copyfileobj(fi,fo,1024*1024)
+                if info.is_dir() or not info.filename.lower().endswith(".mca"): continue
+                if "/region/" in ("/"+info.filename).lower() or info.filename.lower().startswith("region/") or re.match(r"(^|.*/)r\.-?\d+\.-?\d+\.mca$",info.filename):
+                    dest=out/Path(info.filename).name
+                    with z.open(info) as fi, dest.open("wb") as fo: shutil.copyfileobj(fi,fo,1024*1024)
+                    found+=1
+            if not found: raise ConversionError("ZIP contains no .mca region files")
         return out
     if source.is_dir():
         if (source/"region").is_dir(): return source/"region"
@@ -3093,49 +2741,12 @@ def discover_source_entity_regions(source: Path, tempdir: Path):
 def audit_source_entities(source: Path, tempdir: Path, log=print):
     entity_dir=discover_source_entity_regions(Path(source),tempdir)
     if entity_dir is None:
-        # Java 1.8-1.16-era worlds keep entities inside terrain chunks instead
-        # of a separate entities/ region tree. Scan those only when the source
-        # chunk format explicitly exposes an Entities list; for newer region-only
-        # inputs, absence of entities/ still means entity loss is unknowable.
-        counts=collections.Counter(); chunks=0; regions=0; failures=[]; saw_in_chunk_entities_tag=False
-        try:
-            terrain_dir=discover_source_regions(Path(source),tempdir)
-            for rp in sorted(terrain_dir.glob("r.*.*.mca")):
-                if not rp.is_file() or rp.stat().st_size<8192: continue
-                regions+=1
-                for idx,raw in RegionReader(rp).chunks():
-                    chunks+=1
-                    try:
-                        c=parse_modern_chunk(raw)
-                        if c.get("entities_in_chunk_present"):
-                            saw_in_chunk_entities_tag=True
-                            for ent in c.get("entities") or []:
-                                if isinstance(ent,dict): counts[str(ent.get("id") or "<unknown>")]+=1
-                                else: counts["<malformed>"]+=1
-                    except Exception as exc:
-                        if len(failures)<20: failures.append({"region":rp.name,"chunk_index":idx,"error":str(exc)})
-        except Exception as exc:
-            if len(failures)<20: failures.append({"region":"<source>","error":str(exc)})
-        if failures:
-            sample="; ".join("%s chunk %s: %s"%(x.get("region"),x.get("chunk_index","?"),x.get("error")) for x in failures[:5])
-            raise ConversionError("In-chunk entity audit failed. No output world was created. Examples: %s"%sample)
-        if saw_in_chunk_entities_tag:
-            total=sum(counts.values())
-            log("Content audit: %d source entities stored in legacy terrain chunks across %d region file(s)."%(total,regions))
-            return {
-                "scan_status":"scanned_in_chunk",
-                "entities_total":total,
-                "entity_types":dict(counts),
-                "entity_regions":regions,
-                "entity_chunks":chunks,
-                "note":"Source entities were audited from terrain chunk Entities lists; the current 1.7.10 backend reports but does not yet translate them.",
-            }
         return {
             "scan_status":"unavailable",
             "entities_total":None,
             "entity_types":{},
             "entity_regions":0,
-            "note":"No entities/ region was available and source terrain chunks did not contain legacy Entities lists; entity loss cannot be quantified.",
+            "note":"No modern entities/ region was available from this source input; entity loss cannot be quantified.",
         }
 
     counts=collections.Counter(); chunks=0; regions=0; failures=[]
@@ -3302,7 +2913,6 @@ def _conversion_fingerprint(
         raise ConversionError("Target/template world has no level.dat: %s" % template)
     st=level.stat()
     payload={
-        "source_format_revision":SOURCE_FORMAT_REVISION,
         "source":_source_fingerprint(source),
         "template_level_dat":{"path":str(level),"size":st.st_size,"mtime_ns":st.st_mtime_ns},
         "target_registry":_registry_fingerprint(reg),
@@ -3658,17 +3268,10 @@ def analyze_source(source, out_json, log=print):
             log("Scanning "+rp.name)
             for _,raw in RegionReader(rp).chunks():
                 c=parse_modern_chunk(raw); chunks+=1; dvs[str(c.get("DataVersion"))]+=1
-                for section in c["sections"]:
-                    states,_inds=_source_section_states(section,c.get("DataVersion"))
-                    if not states: continue
-                    y=section.get("Y"); ymin=min(ymin,y); ymax=max(ymax,y)
-                    for state in states:
-                        if state.get("kind")=="palette":
-                            counts[state.get("name") or "minecraft:air"]+=1
-                        else:
-                            bid=int(state.get("legacy_id",0)); meta=int(state.get("legacy_meta",0))
-                            modern,_props=_preflatten_to_modern_state(bid,meta)
-                            counts[modern or ("legacy:%d:%d"%(bid,meta))]+=1
+                for s in c["sections"]:
+                    if s.get("palette"):
+                        y=s.get("Y"); ymin=min(ymin,y); ymax=max(ymax,y)
+                        for n,_ in s["palette"]: counts[n]+=1
     rep={"regions":nonempty_regions,"chunks":chunks,"data_versions":dict(dvs),"section_y_min":ymin,"section_y_max":ymax,"block_palette_occurrences":dict(sorted(counts.items()))}
     Path(out_json).write_text(json.dumps(rep,indent=2),encoding="utf-8")
     return rep
