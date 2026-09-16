@@ -62,6 +62,8 @@ def _stats():
         "chunks_cropped_below_0": 0,
         "lighting_source_seed_sections": 0,
         "lighting_fallback_sections": 0,
+        "lighting_empty_sections_omitted": 0,
+        "lighting_emitted_sections": 0,
     }
 
 
@@ -252,3 +254,68 @@ def test_p018_legacy_writer_rejects_population_or_lighting_contract_breakage():
     assert parsed["Level"]["LightPopulated"] == 0
     assert len(parsed["Level"]["Sections"][0]["SkyLight"]) == 2048
     assert len(parsed["Level"]["Sections"][0]["BlockLight"]) == 2048
+
+
+def test_p018b_all_air_sections_are_not_materialized_as_legacy_storage():
+    reg = _registry()
+    stats = _stats()
+    raw = _modern_chunk([
+        _section(0, [("minecraft:air", {})], _light_array(15), _light_array(0)),
+        _section(1, [("minecraft:stone", {})], _light_array(7), _light_array(0)),
+        _section(2, [("minecraft:air", {})], None, None),
+    ])
+    (_, _), legacy = engine.convert_chunk(raw, reg, True, 64, 0, stats)
+    _, parsed = engine.parse_nbt(legacy)
+    level = parsed["Level"]
+
+    # Only the target section containing actual blocks is serialized. This is
+    # the native 1.7.10 representation of empty vertical space and prevents
+    # phantom all-air ExtendedBlockStorage objects from raising topFilledSegment.
+    assert [section["Y"] for section in level["Sections"]] == [5]
+    assert stats["lighting_empty_sections_omitted"] == 2
+    assert stats["lighting_emitted_sections"] == 1
+    assert stats["lighting_source_seed_sections"] == 1
+    assert stats["lighting_fallback_sections"] == 0
+    assert set(level["HeightMap"]) == {96}
+
+
+def test_p018b_all_air_section_with_light_arrays_is_still_sparse():
+    reg = _registry()
+    stats = _stats()
+    sky_vals = np.full(4096, 12, dtype=np.uint8)
+    block_vals = np.full(4096, 3, dtype=np.uint8)
+    raw = _modern_chunk([
+        _section(0, [("minecraft:stone", {})], _light_array(0), _light_array(0)),
+        _section(1, [("minecraft:air", {})], engine.pack_nibbles(sky_vals), engine.pack_nibbles(block_vals)),
+    ])
+    (_, _), legacy = engine.convert_chunk(raw, reg, True, 64, 0, stats)
+    _, parsed = engine.parse_nbt(legacy)
+
+    # Air-only source light is not authoritative for the target runtime because
+    # there is no block storage to preserve. Let 1.7.10 infer sky from HeightMap
+    # and rebuild block light while LightPopulated remains false.
+    assert [section["Y"] for section in parsed["Level"]["Sections"]] == [4]
+    assert stats["lighting_empty_sections_omitted"] == 1
+    assert stats["lighting_emitted_sections"] == 1
+    assert parsed["Level"]["LightPopulated"] == 0
+
+
+def test_p018b_sparse_sections_keep_non_empty_source_light_and_offset():
+    reg = _registry()
+    stats = _stats()
+    sky = _light_array(9)
+    block = _light_array(4)
+    raw = _modern_chunk([
+        _section(-1, [("minecraft:air", {})], None, None),
+        _section(0, [("minecraft:stone", {})], sky, block),
+        _section(1, [("minecraft:air", {})], None, None),
+    ])
+    (_, _), legacy = engine.convert_chunk(raw, reg, True, 64, 0, stats)
+    _, parsed = engine.parse_nbt(legacy)
+    section = parsed["Level"]["Sections"][0]
+
+    assert section["Y"] == 4
+    assert section["SkyLight"] == sky
+    assert section["BlockLight"] == block
+    assert stats["lighting_empty_sections_omitted"] == 2
+    assert stats["lighting_emitted_sections"] == 1

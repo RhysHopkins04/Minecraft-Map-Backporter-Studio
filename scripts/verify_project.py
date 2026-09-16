@@ -493,7 +493,7 @@ for token in [
 # LightPopulated=0 for target-side reconciliation.
 for token in [
     'CONTENT_POLICY = "terrain_blocks_with_loss_manifest_and_efr_state_tile_entities"',
-    'LIGHTING_STRATEGY = "validated_source_light_seed_plus_target_runtime_reconcile"',
+    'LIGHTING_STRATEGY = "validated_source_light_seed_plus_sparse_legacy_sections_plus_target_runtime_reconcile"',
     'HEIGHTMAP_STRATEGY = "source_skylight_derived_with_non_air_fallback"',
     'BLOCK_PROPERTY_STRATEGY = "source_properties_to_legacy_metadata_plus_efr_state_tile_entities_plus_runtime_neighbors"',
     '"block_entities":[]',
@@ -525,6 +525,8 @@ for token in [
     'elif k == "BlockLight" and t == 7:',
     'def derive_heightmap_from_skylight(',
     '"lighting_source_seed_sections":0,"lighting_fallback_sections":0',
+    '"lighting_empty_sections_omitted":0,"lighting_emitted_sections":0',
+    'if not np.any(np.asarray(ids,dtype=np.uint16) != air_id):',
     'Generated legacy chunk must keep TerrainPopulated=1',
     'Generated legacy chunk must keep LightPopulated=0 for target-side light reconciliation',
 ]:
@@ -538,6 +540,9 @@ for token in [
     "def test_p018_valid_source_light_is_shifted_not_zeroed_and_heightmap_tracks_roof():",
     "def test_p018_open_sky_and_enclosed_columns_derive_independent_height_boundaries():",
     "def test_p018_untrusted_or_malformed_source_light_is_not_preserved():",
+    "def test_p018b_all_air_sections_are_not_materialized_as_legacy_storage():",
+    "def test_p018b_all_air_section_with_light_arrays_is_still_sparse():",
+    "def test_p018b_sparse_sections_keep_non_empty_source_light_and_offset():",
 ]:
     if token not in p018_test:
         error(f"P018 regression test missing: {token}")
@@ -548,6 +553,14 @@ for token in [
 ]:
     if token not in p018_diag:
         error(f"P018 ladder diagnostic invariant missing: {token}")
+
+p018b_diag = (root / "scripts" / "diagnose_p018b_lighting.py").read_text(encoding="utf-8")
+for token in [
+    "--converted", "phantom_all_air_sections", "malformed_light_sections",
+    "P018b lighting/storage audit: PASS",
+]:
+    if token not in p018b_diag:
+        error(f"P018b lighting diagnostic invariant missing: {token}")
 
 for token in [
     'f"{be_count:,} block entities',

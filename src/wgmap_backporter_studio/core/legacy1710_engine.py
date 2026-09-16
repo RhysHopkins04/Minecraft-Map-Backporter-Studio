@@ -47,7 +47,7 @@ AIR_NAMES = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
 # instead of being silently discarded. Legacy output chunks are emitted with
 # LightPopulated=0 so the target 1.7.10 runtime can perform its own relight pass.
 CONTENT_POLICY = "terrain_blocks_with_loss_manifest_and_efr_state_tile_entities"
-LIGHTING_STRATEGY = "validated_source_light_seed_plus_target_runtime_reconcile"
+LIGHTING_STRATEGY = "validated_source_light_seed_plus_sparse_legacy_sections_plus_target_runtime_reconcile"
 HEIGHTMAP_STRATEGY = "source_skylight_derived_with_non_air_fallback"
 BLOCK_PROPERTY_STRATEGY = "source_properties_to_legacy_metadata_plus_efr_state_tile_entities_plus_runtime_neighbors"
 
@@ -2518,6 +2518,9 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
     state_tile_entities=[]
     sec_by_target={}
     high_crop=False; low_crop=False
+    air_id=reg.resolve("minecraft:air")
+    if air_id is None:
+        raise ConversionError("Target registry missing minecraft:air")
 
     # First pass: convert every source section that intersects legacy 0..255 after offset.
     for s in c["sections"]:
@@ -2597,7 +2600,6 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
         sec_by_target[ty]=(ids,metas,source_sky,source_block)
         # Geometry fallback is retained for columns where source skylight is not
         # serialized. It is no longer used as the primary lighting boundary.
-        air_id=reg.resolve("minecraft:air")
         a=ids.reshape(16,16,16)
         solid=a != air_id
         for ly in range(16):
@@ -2626,8 +2628,24 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
     section_skylight={}
     lighting_source_sections=0
     lighting_fallback_sections=0
+    lighting_empty_sections_omitted=0
+    lighting_emitted_sections=0
     for ty in sorted(sec_by_target):
         ids,metas,source_sky,source_block=sec_by_target[ty]
+
+        # P018b: do not serialize an ExtendedBlockStorage for a section that is
+        # entirely target air. In vanilla 1.7.10 a missing storage section is the
+        # canonical representation of empty space: block light reads as zero and
+        # sky light is inferred from the chunk HeightMap. Materializing modern
+        # all-air sections made getTopFilledSegment() see phantom storage all the
+        # way to Y=255 and forced the legacy relight code to reconcile thousands
+        # of meaningless light cells. Keeping the section sparse gives 1.7.10 the
+        # same storage topology it would create itself and removes the remaining
+        # isolated stale-light surfaces without inventing target light values.
+        if not np.any(np.asarray(ids,dtype=np.uint16) != air_id):
+            lighting_empty_sections_omitted+=1
+            continue
+
         if source_sky is None:
             yvals=np.arange(ty*16,ty*16+16,dtype=np.int32)[:,None,None]
             sky_vals=np.where(yvals>=height[None,:,:],15,0).astype(np.uint8).reshape(-1)
@@ -2639,9 +2657,12 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
             source_block=bytes(2048)
         section_skylight[ty]=source_sky
         converted.append(make_section_nbt(ty,ids,metas,source_sky,source_block))
+        lighting_emitted_sections+=1
 
     stats["lighting_source_seed_sections"]+=lighting_source_sections
     stats["lighting_fallback_sections"]+=lighting_fallback_sections
+    stats["lighting_empty_sections_omitted"]+=lighting_empty_sections_omitted
+    stats["lighting_emitted_sections"]+=lighting_emitted_sections
     legacy_height=derive_heightmap_from_skylight(section_skylight,height).reshape(-1).tolist()
 
     biomes=choose_biomes(c["sections"])
@@ -2995,6 +3016,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
         "chunks_converted":0,"chunks_verified":0,"chunks_failed":0,
         "chunks_cropped_above_255":0,"chunks_cropped_below_0":0,
         "lighting_source_seed_sections":0,"lighting_fallback_sections":0,
+        "lighting_empty_sections_omitted":0,"lighting_emitted_sections":0,
         "block_entities_omitted":0,
         "block_entity_types_omitted":collections.Counter(),
         "block_entities_synthesized":0,
@@ -3050,7 +3072,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             "Source entities detected: %s"%entity_text,
             "Entities translated: 0",
             "Block-property strategy: %s"%BLOCK_PROPERTY_STRATEGY,
-            "Lighting strategy: %s (validated source light is Y-shifted when available; legacy chunks remain LightPopulated=0 for target reconciliation)"%LIGHTING_STRATEGY,
+            "Lighting strategy: %s (validated source light is Y-shifted for retained non-empty sections; all-air storage sections are omitted; legacy chunks remain LightPopulated=0 for target reconciliation)"%LIGHTING_STRATEGY,
             "Heightmap strategy: %s"%HEIGHTMAP_STRATEGY, "",
             "Converted regions: %d / %d"%(serial.get("regions_converted",0),serial.get("regions_total",0)),
             "Round-trip verified regions: %d"%serial.get("regions_verified",0),
@@ -3059,8 +3081,10 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             "Failed chunks: %d"%serial.get("chunks_failed",0),
             "Chunks with source blocks cropped above Y=255: %d"%serial.get("chunks_cropped_above_255",0),
             "Chunks with source blocks cropped below Y=0: %d"%serial.get("chunks_cropped_below_0",0),
+            "Lighting sections emitted to legacy storage: %d"%serial.get("lighting_emitted_sections",0),
             "Lighting sections seeded from validated source arrays: %d"%serial.get("lighting_source_seed_sections",0),
-            "Lighting sections using conservative fallback bootstrap: %d"%serial.get("lighting_fallback_sections",0), "",
+            "Lighting sections using conservative fallback bootstrap: %d"%serial.get("lighting_fallback_sections",0),
+            "All-air modern sections omitted from legacy storage: %d"%serial.get("lighting_empty_sections_omitted",0), "",
         ]
         preflight=serial.get("preflight") or {}
         occurrence_total=int(preflight.get("block_occurrences_total",0) or 0)
