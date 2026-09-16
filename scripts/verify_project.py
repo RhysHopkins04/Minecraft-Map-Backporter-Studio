@@ -57,6 +57,8 @@ required = [
     "src/wgmap_backporter_studio/core/workspace_store.py",
     "src/wgmap_backporter_studio/ui/main_window.py",
     "tests/test_smoke.py",
+    "tests/test_p018_legacy_lighting_and_ladders.py",
+    "scripts/diagnose_p018_ladders.py",
 ]
 for rel in required:
     if not (root / rel).is_file():
@@ -486,12 +488,13 @@ for token in [
     if token not in main_window:
         error(f"Backporter result-state UI invariant missing: {token}")
 
-# Patch 013 makes unsupported world content explicit, stages output until it is
-# structurally verified, and leaves legacy chunks marked for target-side relight.
+# Patch 013 makes unsupported world content explicit and stages output until it is
+# structurally verified. P018 upgrades the legacy-light seed while retaining
+# LightPopulated=0 for target-side reconciliation.
 for token in [
     'CONTENT_POLICY = "terrain_blocks_with_loss_manifest_and_efr_state_tile_entities"',
-    'LIGHTING_STRATEGY = "target_runtime_relight"',
-    'HEIGHTMAP_STRATEGY = "bootstrap_highest_non_air"',
+    'LIGHTING_STRATEGY = "validated_source_light_seed_plus_target_runtime_reconcile"',
+    'HEIGHTMAP_STRATEGY = "source_skylight_derived_with_non_air_fallback"',
     'BLOCK_PROPERTY_STRATEGY = "source_properties_to_legacy_metadata_plus_efr_state_tile_entities_plus_runtime_neighbors"',
     '"block_entities":[]',
     'elif k == "block_entities" and t == 9:',
@@ -514,6 +517,37 @@ for token in [
 ]:
     if token not in legacy:
         error(f"Patch 013 world-content/staging invariant missing: {token}")
+
+for token in [
+    'def ladder_meta(props):',
+    'elif p=="ladder": meta=ladder_meta(props)',
+    'elif k == "SkyLight" and t == 7:',
+    'elif k == "BlockLight" and t == 7:',
+    'def derive_heightmap_from_skylight(',
+    '"lighting_source_seed_sections":0,"lighting_fallback_sections":0',
+    'Generated legacy chunk must keep TerrainPopulated=1',
+    'Generated legacy chunk must keep LightPopulated=0 for target-side light reconciliation',
+]:
+    if token not in legacy:
+        error(f"P018 legacy lighting/ladder invariant missing: {token}")
+
+p018_test = (root / "tests" / "test_p018_legacy_lighting_and_ladders.py").read_text(encoding="utf-8")
+for token in [
+    "def test_p018_ladder_all_four_facings_use_legacy_wall_metadata():",
+    "def test_p018_ladder_facing_survives_plus_64_y_offset():",
+    "def test_p018_valid_source_light_is_shifted_not_zeroed_and_heightmap_tracks_roof():",
+    "def test_p018_open_sky_and_enclosed_columns_derive_independent_height_boundaries():",
+    "def test_p018_untrusted_or_malformed_source_light_is_not_preserved():",
+]:
+    if token not in p018_test:
+        error(f"P018 regression test missing: {token}")
+
+p018_diag = (root / "scripts" / "diagnose_p018_ladders.py").read_text(encoding="utf-8")
+for token in [
+    "--source", "--converted", "--y-offset", "expected_1_7_10_meta", "source_coordinate", "target_coordinate",
+]:
+    if token not in p018_diag:
+        error(f"P018 ladder diagnostic invariant missing: {token}")
 
 for token in [
     'f"{be_count:,} block entities',

@@ -47,8 +47,8 @@ AIR_NAMES = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
 # instead of being silently discarded. Legacy output chunks are emitted with
 # LightPopulated=0 so the target 1.7.10 runtime can perform its own relight pass.
 CONTENT_POLICY = "terrain_blocks_with_loss_manifest_and_efr_state_tile_entities"
-LIGHTING_STRATEGY = "target_runtime_relight"
-HEIGHTMAP_STRATEGY = "bootstrap_highest_non_air"
+LIGHTING_STRATEGY = "validated_source_light_seed_plus_target_runtime_reconcile"
+HEIGHTMAP_STRATEGY = "source_skylight_derived_with_non_air_fallback"
 BLOCK_PROPERTY_STRATEGY = "source_properties_to_legacy_metadata_plus_efr_state_tile_entities_plus_runtime_neighbors"
 
 # Minecraft dye/block metadata ordering in legacy 1.7.10.
@@ -463,7 +463,7 @@ def parse_biomes(r: Reader):
 
 
 def parse_section(r: Reader):
-    y=None; bp=[]; bd=None; biop=[]; biod=None
+    y=None; bp=[]; bd=None; biop=[]; biod=None; skylight=None; blocklight=None
     while True:
         t=r.u8()
         if t == 0: break
@@ -471,8 +471,15 @@ def parse_section(r: Reader):
         if k == "Y" and t == 1: y=r.i8()
         elif k == "block_states" and t == 10: bp,bd=parse_block_states(r)
         elif k == "biomes" and t == 10: biop,biod=parse_biomes(r)
+        elif k == "SkyLight" and t == 7:
+            skylight=read_payload(r,7)
+        elif k == "BlockLight" and t == 7:
+            blocklight=read_payload(r,7)
         else: skip_payload(r,t)
-    return {"Y":y, "palette":bp, "data":bd, "biome_palette":biop, "biome_data":biod}
+    return {
+        "Y":y, "palette":bp, "data":bd, "biome_palette":biop, "biome_data":biod,
+        "SkyLight":skylight, "BlockLight":blocklight,
+    }
 
 
 def parse_modern_chunk(raw: bytes):
@@ -480,7 +487,7 @@ def parse_modern_chunk(raw: bytes):
     if rt != 10: raise ConversionError("Modern chunk root is not a compound")
     out={
         "xPos":None,"zPos":None,"LastUpdate":0,"DataVersion":None,
-        "sections":[],"block_entities":[],
+        "sections":[],"block_entities":[],"isLightOn":None,
     }
     while True:
         t=r.u8()
@@ -490,6 +497,7 @@ def parse_modern_chunk(raw: bytes):
         elif k == "zPos" and t == 3: out["zPos"]=r.i32()
         elif k == "LastUpdate" and t == 4: out["LastUpdate"]=r.i64()
         elif k == "DataVersion" and t == 3: out["DataVersion"]=r.i32()
+        elif k == "isLightOn" and t == 1: out["isLightOn"]=bool(r.i8())
         elif k == "sections" and t == 9:
             et=r.u8(); n=r.i32()
             if et == 10: out["sections"]=[parse_section(r) for _ in range(n)]
@@ -839,6 +847,18 @@ def log_axis_bits(props, wood_block=False):
 
 def sign_wall_meta(props): return {"north":2,"south":3,"west":4,"east":5}.get(props.get("facing"),2)
 def torch_wall_meta(props): return {"east":1,"west":2,"south":3,"north":4}.get(props.get("facing"),5)
+
+def ladder_meta(props):
+    """Modern ladder facing -> Minecraft/Forge 1.7.10 BlockLadder metadata.
+
+    Modern ``facing`` names the direction from the support block toward the
+    ladder. 1.7.10 uses metadata 2/3/4/5 for north/south/west/east respectively.
+    Metadata 0/1 do not describe a valid wall attachment and can render with
+    stale/default bounds, so ladder conversion must not fall through to meta 0.
+    """
+    return {"north":2,"south":3,"west":4,"east":5}.get(
+        str(props.get("facing","north")).lower(),2
+    )
 
 def direction_meta(props,key="facing",default="up"):
     """ForgeDirection/vanilla side ordinal: down/up/north/south/west/east."""
@@ -1677,6 +1697,7 @@ def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: 
         elif p=="anvil": meta={"north":0,"south":0,"east":1,"west":1}.get(props.get("facing"),0)
         elif p in {"pumpkin","carved_pumpkin","jack_o_lantern"}: meta={"south":0,"west":1,"north":2,"east":3}.get(props.get("facing"),0)
         elif p in {"piston","sticky_piston"}: meta=piston_meta(props)
+        elif p=="ladder": meta=ladder_meta(props)
         elif p=="cauldron": meta=int(props.get("level","0"))&3
         elif p=="farmland": meta=min(7,int(props.get("moisture","0")))
         elif p=="sponge": meta=0
@@ -2281,12 +2302,51 @@ def _etfuturum_state_tile_entity(target_name, _source_path, props, x, y, z, reg=
         )
     return None
 
-def make_section_nbt(y, ids, metas, skylight):
+def _validated_light_array(value):
+    if isinstance(value,(bytes,bytearray)) and len(value)==2048:
+        return bytes(value)
+    return None
+
+def unpack_nibbles(data):
+    raw=np.frombuffer(bytes(data),dtype=np.uint8)
+    out=np.empty(raw.size*2,dtype=np.uint8)
+    out[0::2]=raw & 15
+    out[1::2]=(raw >> 4) & 15
+    return out
+
+def derive_heightmap_from_skylight(section_skylight, fallback_height):
+    """Derive the 1.7.10 skylight height boundary from translated source light.
+
+    For an overworld chunk the legacy HeightMap is the first Y above the
+    top light-attenuating block. A valid source skylight column carries the
+    same boundary under a section-aligned vertical translation: starting from
+    the top of the target world, the first cell whose skylight is below 15 is
+    the attenuating cell and the legacy height is one block above it. Columns
+    lacking enough source light data retain the conservative geometry fallback.
+    """
+    result=np.asarray(fallback_height,dtype=np.int32).reshape(16,16).copy()
+    known=np.zeros((16,16),dtype=bool)
+    for ty,packed in sorted(section_skylight.items(),reverse=True):
+        light=_validated_light_array(packed)
+        if light is None: continue
+        vals=unpack_nibbles(light).reshape(16,16,16)
+        for ly in range(15,-1,-1):
+            below=(vals[ly] < 15) & (~known)
+            if np.any(below):
+                result[below]=ty*16+ly+1
+                known[below]=True
+        if np.all(known): break
+    return result
+
+def make_section_nbt(y, ids, metas, skylight, blocklight=None):
     ids=np.asarray(ids,dtype=np.uint16).reshape(4096)
     low=(ids & 255).astype(np.uint8).tobytes()
     high=((ids >> 8) & 15).astype(np.uint8)
     data=pack_nibbles(np.asarray(metas,dtype=np.uint8).reshape(4096)&15)
-    blocklight=bytes(2048)
+    skylight=_validated_light_array(skylight)
+    if skylight is None:
+        raise ConversionError("Legacy SkyLight seed must be exactly 2048 bytes")
+    blocklight=_validated_light_array(blocklight) or bytes(2048)
     tags=[tag(1,"Y",p_byte(y)),tag(7,"Blocks",p_byte_array(low)),tag(7,"Data",p_byte_array(data)),
           tag(7,"BlockLight",p_byte_array(blocklight)),tag(7,"SkyLight",p_byte_array(skylight))]
     if np.any(high): tags.append(tag(7,"Add",p_byte_array(pack_nibbles(high))))
@@ -2364,8 +2424,12 @@ def validate_legacy_chunk_nbt(raw: bytes, expected_cx=None, expected_cz=None):
         raise ConversionError("Generated legacy chunk Biomes array is not exactly 256 bytes")
     if not isinstance(heightmap,list) or len(heightmap)!=256:
         raise ConversionError("Generated legacy chunk HeightMap is not exactly 256 integers")
+    if level.get("TerrainPopulated") != 1:
+        raise ConversionError("Generated legacy chunk must keep TerrainPopulated=1 to prevent target world-generation population")
     if level.get("LightPopulated") != 0:
-        raise ConversionError("Generated legacy chunk must keep LightPopulated=0 for target relight")
+        raise ConversionError("Generated legacy chunk must keep LightPopulated=0 for target-side light reconciliation")
+    if any((not isinstance(v,int) or v < 0 or v > 256) for v in heightmap):
+        raise ConversionError("Generated legacy chunk HeightMap contains a value outside 0..256")
 
     sections=level.get("Sections",[])
     if not isinstance(sections,list):
@@ -2524,8 +2588,15 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
                     stats["block_entity_types_synthesized"][
                         "etfuturum.glow_lichen" if str(resolved).lower()=="etfuturum:glow_lichen" else str(resolved).lower()
                     ]+=1
-        sec_by_target[ty]=(ids,metas)
-        # Heightmap uses highest non-air block as a robust map/surface approximation.
+        # Underground stripping changes target geometry and can invalidate light
+        # propagation even in retained sections above the strip boundary, so a
+        # stripped chunk never reuses serialized source light as its seed.
+        source_light_trusted=(c.get("isLightOn") is not False) and strip_below_y<=0
+        source_sky=_validated_light_array(s.get("SkyLight")) if source_light_trusted else None
+        source_block=_validated_light_array(s.get("BlockLight")) if source_light_trusted else None
+        sec_by_target[ty]=(ids,metas,source_sky,source_block)
+        # Geometry fallback is retained for columns where source skylight is not
+        # serialized. It is no longer used as the primary lighting boundary.
         air_id=reg.resolve("minecraft:air")
         a=ids.reshape(16,16,16)
         solid=a != air_id
@@ -2537,16 +2608,45 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
     if high_crop: stats["chunks_cropped_above_255"]+=1
     if low_crop: stats["chunks_cropped_below_0"]+=1
 
-    # Build skylight after height is known.
+    # Cropping changes the geometry seen by every light column in the chunk.
+    # A high crop can expose previously roofed columns to sky and a low crop can
+    # remove emitters/occluders below retained sections, so no source light array
+    # remains a safe deterministic seed once either edge was clipped.
+    if high_crop or low_crop:
+        sec_by_target={
+            ty:(ids,metas,None,None)
+            for ty,(ids,metas,_source_sky,_source_block) in sec_by_target.items()
+        }
+
+    # P018: a uniform section-aligned Y translation does not change the local
+    # light field. Preserve only valid modern 2048-byte nibble arrays as a
+    # deterministic seed; never copy malformed/unlit source data. For missing
+    # arrays, retain the old conservative vertical bootstrap and leave
+    # LightPopulated=0 so 1.7.10 reconciles target-specific opacity/emission.
+    section_skylight={}
+    lighting_source_sections=0
+    lighting_fallback_sections=0
     for ty in sorted(sec_by_target):
-        ids,metas=sec_by_target[ty]
-        yvals=np.arange(ty*16,ty*16+16,dtype=np.int32)[:,None,None]
-        sky=np.where(yvals>=height[None,:,:],15,0).astype(np.uint8).reshape(-1)
-        converted.append(make_section_nbt(ty,ids,metas,pack_nibbles(sky)))
+        ids,metas,source_sky,source_block=sec_by_target[ty]
+        if source_sky is None:
+            yvals=np.arange(ty*16,ty*16+16,dtype=np.int32)[:,None,None]
+            sky_vals=np.where(yvals>=height[None,:,:],15,0).astype(np.uint8).reshape(-1)
+            source_sky=pack_nibbles(sky_vals)
+            lighting_fallback_sections+=1
+        else:
+            lighting_source_sections+=1
+        if source_block is None:
+            source_block=bytes(2048)
+        section_skylight[ty]=source_sky
+        converted.append(make_section_nbt(ty,ids,metas,source_sky,source_block))
+
+    stats["lighting_source_seed_sections"]+=lighting_source_sections
+    stats["lighting_fallback_sections"]+=lighting_fallback_sections
+    legacy_height=derive_heightmap_from_skylight(section_skylight,height).reshape(-1).tolist()
 
     biomes=choose_biomes(c["sections"])
     legacy=make_chunk_nbt(
-        cx,cz,c.get("LastUpdate",0),converted,height.reshape(-1).tolist(),biomes,
+        cx,cz,c.get("LastUpdate",0),converted,legacy_height,biomes,
         tile_entities=state_tile_entities,
     )
     validate_legacy_chunk_nbt(legacy,cx,cz)
@@ -2894,6 +2994,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
         "regions_total":0,"regions_converted":0,"regions_verified":0,
         "chunks_converted":0,"chunks_verified":0,"chunks_failed":0,
         "chunks_cropped_above_255":0,"chunks_cropped_below_0":0,
+        "lighting_source_seed_sections":0,"lighting_fallback_sections":0,
         "block_entities_omitted":0,
         "block_entity_types_omitted":collections.Counter(),
         "block_entities_synthesized":0,
@@ -2949,7 +3050,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             "Source entities detected: %s"%entity_text,
             "Entities translated: 0",
             "Block-property strategy: %s"%BLOCK_PROPERTY_STRATEGY,
-            "Lighting strategy: %s (legacy chunks emitted with LightPopulated=0)"%LIGHTING_STRATEGY,
+            "Lighting strategy: %s (validated source light is Y-shifted when available; legacy chunks remain LightPopulated=0 for target reconciliation)"%LIGHTING_STRATEGY,
             "Heightmap strategy: %s"%HEIGHTMAP_STRATEGY, "",
             "Converted regions: %d / %d"%(serial.get("regions_converted",0),serial.get("regions_total",0)),
             "Round-trip verified regions: %d"%serial.get("regions_verified",0),
@@ -2957,7 +3058,9 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             "Round-trip verified chunks: %d"%serial.get("chunks_verified",0),
             "Failed chunks: %d"%serial.get("chunks_failed",0),
             "Chunks with source blocks cropped above Y=255: %d"%serial.get("chunks_cropped_above_255",0),
-            "Chunks with source blocks cropped below Y=0: %d"%serial.get("chunks_cropped_below_0",0), "",
+            "Chunks with source blocks cropped below Y=0: %d"%serial.get("chunks_cropped_below_0",0),
+            "Lighting sections seeded from validated source arrays: %d"%serial.get("lighting_source_seed_sections",0),
+            "Lighting sections using conservative fallback bootstrap: %d"%serial.get("lighting_fallback_sections",0), "",
         ]
         preflight=serial.get("preflight") or {}
         occurrence_total=int(preflight.get("block_occurrences_total",0) or 0)
