@@ -1378,6 +1378,26 @@ def _etfuturum_state_meta(path, props):
     fork exposes explicitly, then fall back to the generic provider translator.
     """
     p=path.lower()
+    if p == "pointed_dripstone":
+        thickness={"tip":0,"frustum":1,"middle":2,"base":3,"tip_merge":4}
+        direction=str(props.get("vertical_direction","up")).lower()
+        shape=str(props.get("thickness","tip")).lower()
+        exact=direction in {"up","down"} and shape in thickness and _only_default_runtime_props(
+            props,{"waterlogged":"false"},ignored={"thickness","vertical_direction"})
+        return thickness.get(shape,0) + (5 if direction=="up" else 0), exact
+    if p == "tall_seagrass":
+        half=str(props.get("half","lower")).lower()
+        return (1 if half=="upper" else 0), half in {"lower","upper"} and _only_default_runtime_props(props,ignored={"half"})
+    if p in {"kelp_plant","seagrass"}:
+        return 0, _only_default_runtime_props(props)
+    if p == "sea_pickle":
+        count=intprop(props,"pickles",1,1,4)
+        return (count-1) | (4 if boolprop(props,"waterlogged") else 0), _only_default_runtime_props(props,ignored={"pickles","waterlogged"})
+    if p.endswith(("_coral","_coral_fan","_coral_wall_fan")):
+        wall=p.endswith("_coral_wall_fan")
+        facing=str(props.get("facing","north")).lower()
+        exact=(not wall or facing in {"north","south","west","east"}) and _only_default_runtime_props(props,ignored={"waterlogged","facing"} if wall else {"waterlogged"})
+        return (direction_meta(props,"facing","north") if wall else 0) | (8 if boolprop(props,"waterlogged") else 0), exact
     if p.endswith("_pressure_plate"):
         return (1 if boolprop(props,"powered") else 0), _only_default_runtime_props(
             props,ignored={"powered"}
@@ -1529,6 +1549,12 @@ def _etfuturum_alias(path, props):
     the selected template registry before accepting the result.
     """
     p=path.lower()
+    if p in {"small_amethyst_bud","medium_amethyst_bud","large_amethyst_bud","amethyst_cluster"}:
+        target="amethyst_cluster_1" if p in {"small_amethyst_bud","medium_amethyst_bud"} else "amethyst_cluster_2"
+        facing=str(props.get("facing","up")).lower()
+        meta=direction_meta(props,"facing","up") + (6 if p in {"medium_amethyst_bud","amethyst_cluster"} else 0)
+        exact=facing in {"down","up","north","south","west","east"} and _only_default_runtime_props(props,{"waterlogged":"false"},ignored={"facing"})
+        return target,meta,exact,"EFR amethyst stage pair + Forge facing ordinal; contained water unsupported"
 
     # Modern coloured/standing/wall banners are one EFR block plus state TE.
     for color,cmeta in COLOR_META.items():
@@ -1788,6 +1814,13 @@ def _map_etfuturum_first(name, props, reg: TargetRegistry):
     if not _etfuturum_registered(reg):
         return None
     p=name.split(":",1)[-1].lower()
+    if p == "kelp" and reg.resolve("etfuturum:kelp") is not None:
+        age=intprop(props or {},"age",0,0,25)
+        compact=reg.resolve("etfuturum:kelp_age_16") is not None
+        target="etfuturum:kelp_age_16" if compact and age>=16 else "etfuturum:kelp"
+        exact=_only_default_runtime_props(props or {},ignored={"age"})
+        return Mapping(target,(age & 15) if compact else 0,"backport_exact" if exact else "backport_close",
+                       "EFR compact kelp age metadata" if compact else "EFR legacy kelp Age BYTE tile state; use updated EFR for map-scale imports")
 
     # Furnace-like EFR blocks retain separate lit/unlit 1.7.10 registry IDs.
     # Prefer the lit identity when the modern state says lit and the selected
@@ -1835,6 +1868,18 @@ def _map_etfuturum_first(name, props, reg: TargetRegistry):
 
 
 def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: MappingProfile | None = None):
+    mapped = _map_modern_impl(name, props, reg, use_hbm, mapping_profile)
+    if boolprop(props or {}, "waterlogged"):
+        target = mapped.target.lower()
+        bounded = target in {"etfuturum:kelp", "etfuturum:kelp_age_16", "etfuturum:kelp_plant", "etfuturum:seagrass", "etfuturum:tall_seagrass", "etfuturum:sea_pickle"} or (
+            target.startswith("etfuturum:") and target.endswith(("_coral", "_coral_fan", "_coral_wall_fan")))
+        if not bounded and mapped.quality in {"exact", "backport_exact"}:
+            mapped = Mapping(mapped.target, mapped.meta, "backport_close" if mapped.quality == "backport_exact" else "approximate",
+                             mapped.note + "; source waterlogged state is unsupported by this target")
+    return mapped
+
+
+def _map_modern_impl(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: MappingProfile | None = None):
     """Return the closest legacy block mapping.
 
     Exact registered blocks from enabled backport-provider catalogs are considered
@@ -1842,6 +1887,9 @@ def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: 
     Forge registry confirms the provider block actually exists. Vanilla blocks
     that already exist in 1.7.10 keep the explicit legacy metadata rules below.
     """
+    # A single observed misspelling; do not normalize other IDs or namespaces.
+    if name == "minecraft:poweder_snow":
+        name = "minecraft:powder_snow"
     p=name.split(":",1)[-1]
 
     def V(target,meta=0,q="exact",note=""): return Mapping(target,meta&15,q,note)
@@ -2209,7 +2257,9 @@ def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: 
     if p in {"azalea_leaves","flowering_azalea_leaves"}: return V("minecraft:leaves",4,"approximate")
     if p in {"big_dripleaf","big_dripleaf_stem","small_dripleaf","spore_blossom","hanging_roots","pink_petals","sweet_berry_bush"}: return V("minecraft:tallgrass",1,"approximate")
     if p in {"cave_vines","cave_vines_plant","twisting_vines","twisting_vines_plant","nether_sprouts","crimson_roots","warped_roots"}: return V("minecraft:vine",0,"approximate")
-    if p in {"kelp","kelp_plant","seagrass","tall_seagrass","sea_pickle"}: return V("minecraft:water",0,"omitted","Underwater plant has no 1.7.10 equivalent; water preserved")
+    if p in {"kelp","kelp_plant","seagrass","tall_seagrass","sea_pickle"} or p.endswith(("_coral","_coral_fan","_coral_wall_fan")):
+        wet=p in {"kelp","kelp_plant","seagrass","tall_seagrass"} or boolprop(props,"waterlogged")
+        return V("minecraft:water" if wet else "minecraft:air",0,"omitted","Aquatic geometry unavailable; source water preserved" if wet else "Dry aquatic geometry unavailable; no water introduced")
     if p=="wheat": return V("minecraft:wheat",min(7,int(props.get("age","0"))))
     if p=="carrots": return V("minecraft:carrots",min(7,int(props.get("age","0"))))
     if p=="potatoes": return V("minecraft:potatoes",min(7,int(props.get("age","0"))))
@@ -2716,6 +2766,8 @@ def _etfuturum_state_tile_entity(target_name, _source_path, props, x, y, z, reg=
     """
     target=str(target_name).lower()
     source_path=str(_source_path).lower()
+    if target == "etfuturum:kelp" and (reg is None or reg.resolve("etfuturum:kelp_age_16") is None):
+        return _legacy_tile_entity_base("etfuturum:modern_parity_kelp_state",x,y,z,[tag(1,"Age",p_byte(intprop(props or {},"age",0,0,25)))])
     if target == "etfuturum:banner":
         base=0
         for color,cmeta in COLOR_META.items():
@@ -3094,7 +3146,8 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
                 "etfuturum:barrel","etfuturum:blast_furnace","etfuturum:lit_blast_furnace",
                 "etfuturum:smoker","etfuturum:lit_smoker","etfuturum:campfire","etfuturum:soul_campfire",
                 "etfuturum:banner","etfuturum:shulker_box","etfuturum:cave_vine",
-            } or (resolved_lower == "minecraft:flower_pot" and source_path in FLOWER_POT_CONTENTS) \
+            } or (resolved_lower == "etfuturum:kelp" and reg.resolve("etfuturum:kelp_age_16") is None) \
+               or (resolved_lower == "minecraft:flower_pot" and source_path in FLOWER_POT_CONTENTS) \
                or (resolved_lower.startswith("etfuturum:") and resolved_lower.endswith("copper_chest")):
                 state_te_specs[state_index]=(source_path,dict(props or {}),str(resolved))
             key=str(source_name)
