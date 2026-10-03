@@ -385,7 +385,7 @@ run_start = legacy.find("def run_conversion(")
 run_end = legacy.find("# ---------- Map analyzer", run_start)
 run_body = legacy[run_start:run_end] if run_start >= 0 and run_end > run_start else ""
 preflight_pos = run_body.find('preflight_source_mappings(')
-stage_pos = run_body.find('_prepare_staging_output(template,output)')
+stage_pos = run_body.find('_prepare_staging_output(')
 if preflight_pos < 0 or stage_pos < 0 or preflight_pos > stage_pos:
     error("run_conversion must finish target/source preflight before creating the staging output")
 

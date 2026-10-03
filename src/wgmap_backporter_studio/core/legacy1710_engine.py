@@ -21,7 +21,7 @@ import hashlib
 import json
 import math
 import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeout
 from functools import lru_cache
 import os
 import re
@@ -330,6 +330,63 @@ class ConversionError(RuntimeError):
     pass
 
 
+class ConversionCancelled(ConversionError):
+    """Requested stop, distinct from a failed conversion or corrupt input."""
+
+
+class CancellationToken:
+    def __init__(self):
+        self._event=threading.Event()
+        self._lock=threading.Lock()
+        self._completed=False
+
+    def cancel(self):
+        with self._lock:
+            if self._completed:
+                return False
+            self._event.set()
+            return True
+
+    def is_set(self):
+        return self._event.is_set()
+
+    def commit(self,fn):
+        # A cancel request and the final atomic promotion cannot race each other.
+        with self._lock:
+            _check_cancel(self)
+            result=fn()
+            self._completed=True
+            return result
+
+
+_REGION_CANCEL_EVENT=None
+
+
+def _check_cancel(cancel=None):
+    event=cancel if cancel is not None else _REGION_CANCEL_EVENT
+    if event is not None and event.is_set():
+        raise ConversionCancelled("Task cancelled")
+
+
+def _copy_stream(source,dest,cancel=None):
+    while True:
+        _check_cancel(cancel)
+        data=source.read(1024*1024)
+        if not data:
+            break
+        _check_cancel(cancel)
+        dest.write(data)
+    _check_cancel(cancel)
+
+
+def _copy_file(source,dest,cancel=None):
+    _check_cancel(cancel)
+    with open(source,"rb") as fi,open(dest,"wb") as fo:
+        _copy_stream(fi,fo,cancel)
+    shutil.copystat(source,dest)
+    return dest
+
+
 class Reader:
     __slots__ = ("b", "i", "n")
     def __init__(self, b: bytes):
@@ -599,6 +656,8 @@ def _palette_uses_padded_longs(data_version):
     # worlds (1.13-1.15.2) use the continuous bit-stream layout.
     try:
         return int(data_version or 0) >= 2566
+    except ConversionCancelled:
+        raise
     except Exception:
         return True
 
@@ -988,6 +1047,8 @@ def load_target_registry(world: Path):
     try:
         with gzip.open(level,"rb") as f: raw=f.read()
         _,root=parse_nbt(raw)
+    except ConversionCancelled:
+        raise
     except Exception as e:
         raise ConversionError("Could not read target/template level.dat: %s" % e) from e
     return _target_registry_from_fml(root.get("FML",{}))
@@ -1082,6 +1143,8 @@ def boolprop(props,k): return str(props.get(k,"false")).lower()=="true"
 def intprop(props,k,default=0,minimum=None,maximum=None):
     try:
         value=int(props.get(k,default))
+    except ConversionCancelled:
+        raise
     except Exception:
         value=int(default)
     if minimum is not None: value=max(int(minimum),value)
@@ -1263,6 +1326,8 @@ def _provider_state_meta(path, props):
     if p.endswith("_sign") or p.endswith("_hanging_sign"):
         try:
             return int(props.get("rotation","0")) & 15, True
+        except ConversionCancelled:
+            raise
         except Exception:
             return 0, False
     if p.endswith(("_log","_stem")):
@@ -1338,6 +1403,8 @@ def _etfuturum_state_meta(path, props):
     if p == "candle" or (p.endswith("_candle") and not p.endswith("_candle_cake")):
         try:
             count=max(1,min(4,int(props.get("candles","1"))))
+        except ConversionCancelled:
+            raise
         except Exception:
             count=1
         return (count-1) | (4 if boolprop(props,"lit") else 0), True
@@ -2266,6 +2333,7 @@ def _scan_preflight_regions(
     y_offset=0,
     log=print,
     mapping_profile: MappingProfile | None = None,
+    cancel=None,
 ):
     """Resolve every in-range unique source palette mapping before output exists.
 
@@ -2287,11 +2355,13 @@ def _scan_preflight_regions(
     property_states=0; property_keys=collections.Counter()
 
     for ri,rp in enumerate(regions,1):
+        _check_cancel(cancel)
         if ri == 1 or ri == len(regions) or ri % 5 == 0:
             log("Preflight [%d/%d] %s" % (ri,len(regions),rp.name))
         try:
             iterator=RegionReader(rp).chunks()
             for idx,raw in iterator:
+                _check_cancel(cancel)
                 try:
                     c=parse_modern_chunk(raw)
                     if c.get("entities_in_chunk_present"):
@@ -2348,6 +2418,8 @@ def _scan_preflight_regions(
                                     mapping_quality[mapping.quality].add(str(source_name))
                                     if ":" in resolved and not resolved.lower().startswith("minecraft:"):
                                         mod_targets[resolved]+=1
+                                except ConversionCancelled:
+                                    raise
                                 except Exception as exc:
                                     unresolved.setdefault(str(exc),[]).append({
                                         "source":str(name), "properties":dict(props or {}),
@@ -2377,9 +2449,13 @@ def _scan_preflight_regions(
                                                 unavailable_provider_impact[(str(source_name),targets,providers)]+=count
                     if chunk_high: crop_high_chunks+=1
                     if chunk_low: crop_low_chunks+=1
+                except ConversionCancelled:
+                    raise
                 except Exception as exc:
                     if len(parse_failures)<20:
                         parse_failures.append({"region":rp.name,"chunk_index":idx,"error":str(exc)})
+        except ConversionCancelled:
+            raise
         except Exception as exc:
             if len(parse_failures)<20:
                 parse_failures.append({"region":rp.name,"error":str(exc)})
@@ -2421,6 +2497,7 @@ def preflight_source_mappings(
     log=print,
     mapping_profile: MappingProfile | None = None,
     workers=None,
+    cancel=None,
 ):
     """Resolve every in-range unique source palette mapping before output exists.
 
@@ -2444,7 +2521,7 @@ def preflight_source_mappings(
     regions=list(regions)
     count=region_worker_count(workers,len(regions))
     log("Preflight using %d worker process(es)"%count)
-    for ri,(rp,part) in enumerate(_region_results("preflight",regions,reg,use_hbm,y_offset,0,mapping_profile,count),1):
+    for ri,(rp,part) in enumerate(_region_results("preflight",regions,reg,use_hbm,y_offset,0,mapping_profile,count,cancel=cancel),1):
         chunks+=part["chunks"]
         block_occurrences_total+=part["block_occurrences_total"]
         stateful_occurrences_total+=part["stateful_occurrences_total"]
@@ -2810,10 +2887,11 @@ class RegionReader:
                 yield idx,raw
 
 
-def write_region(path, chunks_by_index):
+def write_region(path, chunks_by_index, cancel=None):
     path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
     loc=bytearray(4096); times=bytearray(4096); body=bytearray(); sector=2; now=int(time.time())
     for idx in sorted(chunks_by_index):
+        _check_cancel(cancel)
         raw=chunks_by_index[idx]
         comp=zlib.compress(raw,6)
         payload=struct.pack(">I",len(comp)+1)+b"\x02"+comp
@@ -2830,6 +2908,8 @@ def validate_legacy_chunk_nbt(raw: bytes, expected_cx=None, expected_cz=None):
     """Validate the structural invariants required by the legacy 1.7.10 writer."""
     try:
         _,root=parse_nbt(raw)
+    except ConversionCancelled:
+        raise
     except Exception as exc:
         raise ConversionError("Generated legacy chunk NBT is unreadable: %s"%exc) from exc
     if not isinstance(root,dict) or not isinstance(root.get("Level"),dict):
@@ -2882,11 +2962,12 @@ def validate_legacy_chunk_nbt(raw: bytes, expected_cx=None, expected_cz=None):
     return {"xPos":cx,"zPos":cz,"sections":len(sections)}
 
 
-def verify_written_region(path: Path, expected_chunks):
+def verify_written_region(path: Path, expected_chunks, cancel=None):
     """Round-trip the just-written Anvil region and validate every promoted chunk."""
     expected=set(int(x) for x in expected_chunks)
     seen=set()
     for idx,raw in RegionReader(path).chunks():
+        _check_cancel(cancel)
         if idx not in expected:
             raise ConversionError("Output region %s contains unexpected chunk index %d"%(Path(path).name,idx))
         info=validate_legacy_chunk_nbt(raw)
@@ -2908,6 +2989,8 @@ def verify_written_region(path: Path, expected_chunks):
 
 def _legacy_biome_id(value):
     try: value=int(value)
+    except ConversionCancelled:
+        raise
     except Exception: return 1
     # IDs shared by 1.7.10 and later registries can be retained directly. Newer
     # biome IDs outside the old registry fall back to plains rather than risking
@@ -3133,11 +3216,11 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
     return (cx,cz),legacy
 
 
-def discover_source_regions(source: Path, tempdir: Path):
+def discover_source_regions(source: Path, tempdir: Path, cancel=None):
     source=source.resolve()
     if source.is_file() and source.suffix.lower()==".mca":
         out=tempdir/"source_region"; out.mkdir(parents=True,exist_ok=True)
-        shutil.copy2(source, out/source.name)
+        _copy_file(source, out/source.name,cancel)
         return out
     if source.is_file() and source.suffix.lower()==".zip":
         out=tempdir/"source_region"; out.mkdir(parents=True,exist_ok=True)
@@ -3149,6 +3232,7 @@ def discover_source_regions(source: Path, tempdir: Path):
             # overwrote the actual terrain files.
             structured=[]; bare=[]
             for info in z.infolist():
+                _check_cancel(cancel)
                 if info.is_dir(): continue
                 norm=info.filename.replace("\\","/").strip("/")
                 parts=[x for x in norm.split("/") if x]
@@ -3167,6 +3251,7 @@ def discover_source_regions(source: Path, tempdir: Path):
                 raise ConversionError("ZIP contains no overworld terrain region/*.mca files")
             seen=set()
             for info in chosen:
+                _check_cancel(cancel)
                 name=Path(info.filename).name
                 if name in seen:
                     raise ConversionError(
@@ -3175,7 +3260,7 @@ def discover_source_regions(source: Path, tempdir: Path):
                 seen.add(name)
                 dest=out/name
                 with z.open(info) as fi, dest.open("wb") as fo:
-                    shutil.copyfileobj(fi,fo,1024*1024)
+                    _copy_stream(fi,fo,cancel)
         return out
     if source.is_dir():
         if (source/"region").is_dir(): return source/"region"
@@ -3183,7 +3268,7 @@ def discover_source_regions(source: Path, tempdir: Path):
     raise ConversionError("Source must be a modern world folder, region folder, .mca file, or ZIP containing region/*.mca")
 
 
-def discover_source_entity_regions(source: Path, tempdir: Path):
+def discover_source_entity_regions(source: Path, tempdir: Path, cancel=None):
     """Return a modern entity-region directory when the supplied source exposes one.
 
     Modern Java worlds store non-block entities separately from terrain region
@@ -3197,6 +3282,7 @@ def discover_source_entity_regions(source: Path, tempdir: Path):
         found=0
         with zipfile.ZipFile(source) as z:
             for info in z.infolist():
+                _check_cancel(cancel)
                 low=("/"+info.filename).lower()
                 if info.is_dir() or not low.endswith(".mca"):
                     continue
@@ -3206,7 +3292,7 @@ def discover_source_entity_regions(source: Path, tempdir: Path):
                 if not re.match(r"r\.-?\d+\.-?\d+\.mca$",name):
                     continue
                 with z.open(info) as fi, (out/name).open("wb") as fo:
-                    shutil.copyfileobj(fi,fo,1024*1024)
+                    _copy_stream(fi,fo,cancel)
                 found+=1
         return out if found else None
 
@@ -3223,10 +3309,11 @@ def discover_source_entity_regions(source: Path, tempdir: Path):
     return None
 
 
-def _audit_entity_region(rp):
+def _audit_entity_region(rp,cancel=None):
     counts=collections.Counter(); chunks=0; failures=[]
     try:
         for idx,raw in RegionReader(rp).chunks():
+            _check_cancel(cancel)
             chunks+=1
             try:
                 _,root=parse_nbt(raw)
@@ -3240,17 +3327,21 @@ def _audit_entity_region(rp):
                         counts[str(ent.get("id") or "<unknown>")]+=1
                     else:
                         counts["<malformed>"]+=1
+            except ConversionCancelled:
+                raise
             except Exception as exc:
                 if len(failures)<20:
                     failures.append({"region":rp.name,"chunk_index":idx,"error":str(exc)})
+    except ConversionCancelled:
+        raise
     except Exception as exc:
         if len(failures)<20:
             failures.append({"region":rp.name,"error":str(exc)})
     return counts,chunks,failures
 
 
-def audit_source_entities(source: Path, tempdir: Path, log=print, terrain_audit=None, workers=None):
-    entity_dir=discover_source_entity_regions(Path(source),tempdir)
+def audit_source_entities(source: Path, tempdir: Path, log=print, terrain_audit=None, workers=None, cancel=None):
+    entity_dir=discover_source_entity_regions(Path(source),tempdir,cancel)
     if entity_dir is None and terrain_audit is not None:
         log("Content audit: reusing entity records inspected during terrain preflight.")
         return dict(terrain_audit)
@@ -3261,11 +3352,12 @@ def audit_source_entities(source: Path, tempdir: Path, log=print, terrain_audit=
         # inputs, absence of entities/ still means entity loss is unknowable.
         counts=collections.Counter(); chunks=0; regions=0; failures=[]; saw_in_chunk_entities_tag=False
         try:
-            terrain_dir=discover_source_regions(Path(source),tempdir)
+            terrain_dir=discover_source_regions(Path(source),tempdir,cancel)
             for rp in sorted(terrain_dir.glob("r.*.*.mca")):
                 if not rp.is_file() or rp.stat().st_size<8192: continue
                 regions+=1
                 for idx,raw in RegionReader(rp).chunks():
+                    _check_cancel(cancel)
                     chunks+=1
                     try:
                         c=parse_modern_chunk(raw)
@@ -3274,8 +3366,12 @@ def audit_source_entities(source: Path, tempdir: Path, log=print, terrain_audit=
                             for ent in c.get("entities") or []:
                                 if isinstance(ent,dict): counts[str(ent.get("id") or "<unknown>")]+=1
                                 else: counts["<malformed>"]+=1
+                    except ConversionCancelled:
+                        raise
                     except Exception as exc:
                         if len(failures)<20: failures.append({"region":rp.name,"chunk_index":idx,"error":str(exc)})
+        except ConversionCancelled:
+            raise
         except Exception as exc:
             if len(failures)<20: failures.append({"region":"<source>","error":str(exc)})
         if failures:
@@ -3304,7 +3400,7 @@ def audit_source_entities(source: Path, tempdir: Path, log=print, terrain_audit=
     paths=[p for p in sorted(entity_dir.glob("r.*.*.mca")) if p.is_file() and p.stat().st_size>=8192]
     count=region_worker_count(workers,len(paths))
     log("Entity audit using %d worker process(es)"%count)
-    for regions,(rp,part) in enumerate(_region_results("entities",paths,None,False,0,0,None,count),1):
+    for regions,(rp,part) in enumerate(_region_results("entities",paths,None,False,0,0,None,count,cancel=cancel),1):
         region_counts,region_chunks,region_failures=part
         counts.update(region_counts); chunks+=region_chunks
         failures.extend(region_failures[:max(0,20-len(failures))])
@@ -3331,8 +3427,8 @@ def audit_source_entities(source: Path, tempdir: Path, log=print, terrain_audit=
     }
 
 
-def attach_content_audit(preflight: dict, source: Path, tempdir: Path, log=print, workers=None):
-    entity_audit=audit_source_entities(source,tempdir,log,preflight.get("terrain_entity_audit"),workers)
+def attach_content_audit(preflight: dict, source: Path, tempdir: Path, log=print, workers=None, cancel=None):
+    entity_audit=audit_source_entities(source,tempdir,log,preflight.get("terrain_entity_audit"),workers,cancel)
     content={
         "policy":CONTENT_POLICY,
         "block_entities_total":int(preflight.get("block_entities_total",0) or 0),
@@ -3360,8 +3456,9 @@ def attach_content_audit(preflight: dict, source: Path, tempdir: Path, log=print
     return preflight
 
 
-def _prepare_staging_output(template: Path, output: Path):
+def _prepare_staging_output(template: Path, output: Path, cancel=None):
     """Clone the template beside the requested output without exposing partial results."""
+    _check_cancel(cancel)
     template=template.resolve(); output=output.resolve()
     if template==output:
         raise ConversionError("Output must not be the template/source world")
@@ -3374,11 +3471,15 @@ def _prepare_staging_output(template: Path, output: Path):
     output.parent.mkdir(parents=True,exist_ok=True)
     staging=Path(tempfile.mkdtemp(prefix=".%s.wgmbps-staging-"%output.name,dir=str(output.parent)))
     try:
-        shutil.copytree(template,staging,dirs_exist_ok=True)
+        shutil.copytree(template,staging,dirs_exist_ok=True,copy_function=lambda src,dst:_copy_file(src,dst,cancel))
         (staging/"region").mkdir(parents=True,exist_ok=True)
         return staging
+    except ConversionCancelled:
+        shutil.rmtree(staging,ignore_errors=True)
+        raise
     except Exception:
         shutil.rmtree(staging,ignore_errors=True)
+        _check_cancel(cancel)
         raise
 
 
@@ -3394,7 +3495,7 @@ def _stable_hash(payload):
     return hashlib.sha256(raw).hexdigest()
 
 
-def _source_fingerprint(source: Path):
+def _source_fingerprint(source: Path, cancel=None):
     source=source.resolve()
     if not source.exists():
         raise ConversionError("Source path does not exist: %s" % source)
@@ -3406,6 +3507,7 @@ def _source_fingerprint(source: Path):
     region_dir=source/"region" if (source/"region").is_dir() else source
     files=[]
     for p in sorted(region_dir.glob("r.*.*.mca")):
+        _check_cancel(cancel)
         if not p.is_file(): continue
         st=p.stat()
         files.append(("region",p.name,st.st_size,st.st_mtime_ns))
@@ -3419,6 +3521,7 @@ def _source_fingerprint(source: Path):
         entity_dir=source.parent/"entities"
     if entity_dir is not None:
         for p in sorted(entity_dir.glob("r.*.*.mca")):
+            _check_cancel(cancel)
             if not p.is_file(): continue
             st=p.stat()
             files.append(("entities",p.name,st.st_size,st.st_mtime_ns))
@@ -3441,6 +3544,7 @@ def _conversion_fingerprint(
     profile: MappingProfile,
     y_offset: int,
     strip_below_y: int,
+    cancel=None,
 ):
     level=(template/"level.dat").resolve()
     if not level.is_file():
@@ -3448,7 +3552,7 @@ def _conversion_fingerprint(
     st=level.stat()
     payload={
         "source_format_revision":SOURCE_FORMAT_REVISION,
-        "source":_source_fingerprint(source),
+        "source":_source_fingerprint(source,cancel),
         "template_level_dat":{"path":str(level),"size":st.st_size,"mtime_ns":st.st_mtime_ns},
         "target_registry":_registry_fingerprint(reg),
         "mapping_profile":profile.fingerprint_payload(),
@@ -3469,12 +3573,14 @@ def region_worker_count(requested=None,total=None):
 _REGION_CONTEXT=None
 
 
-def _init_region_worker(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging):
-    global _REGION_CONTEXT
+def _init_region_worker(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging,cancel_event):
+    global _REGION_CONTEXT,_REGION_CANCEL_EVENT
     _REGION_CONTEXT=(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging)
+    _REGION_CANCEL_EVENT=cancel_event
 
 
 def _region_task(rp):
+    _check_cancel()
     mode,reg,use_hbm,y_offset,strip_below_y,profile,staging=_REGION_CONTEXT
     if mode == "entities":
         return _audit_entity_region(rp)
@@ -3483,32 +3589,53 @@ def _region_task(rp):
     return _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging)
 
 
-def _region_results(mode,regions,reg,use_hbm,y_offset,strip_below_y,profile,count,staging=None):
-    args=(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging)
+def _region_results(mode,regions,reg,use_hbm,y_offset,strip_below_y,profile,count,staging=None,cancel=None):
+    _check_cancel(cancel)
     if count == 1:
         for rp in regions:
+            _check_cancel(cancel)
             if mode == "entities":
-                part=_audit_entity_region(rp)
+                part=_audit_entity_region(rp,cancel)
             elif mode == "preflight":
-                part=_scan_preflight_regions([rp],reg,use_hbm,y_offset,lambda s:None,profile)
+                part=_scan_preflight_regions([rp],reg,use_hbm,y_offset,lambda s:None,profile,cancel)
             else:
-                part=_convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging)
+                part=_convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging,cancel)
+            _check_cancel(cancel)
             yield rp,part
         return
-    # Keep submission AND completed results bounded on Python 3.11/3.12.
-    # Merge in source order for reproducible reports and failure examples.
-    with ProcessPoolExecutor(max_workers=count,mp_context=multiprocessing.get_context("spawn"),
-                             initializer=_init_region_worker,initargs=args) as pool:
-        pending=collections.deque()
-        paths=iter(regions)
-        for rp in paths:
+    context=multiprocessing.get_context("spawn")
+    stop=context.Event()
+    args=(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging,stop)
+    pool=ProcessPoolExecutor(max_workers=count,mp_context=context,
+                             initializer=_init_region_worker,initargs=args)
+    pending=collections.deque()
+    def result(future):
+        while True:
+            _check_cancel(cancel)
+            try:
+                return future.result(timeout=0.1)
+            except FutureTimeout:
+                if future.done():
+                    return future.result()
+                continue
+    try:
+        for rp in regions:
+            _check_cancel(cancel)
             pending.append((rp,pool.submit(_region_task,rp)))
             if len(pending)>=count*2:
                 first,future=pending.popleft()
-                yield first,future.result()
+                yield first,result(future)
         while pending:
             rp,future=pending.popleft()
-            yield rp,future.result()
+            yield rp,result(future)
+        _check_cancel(cancel)
+    finally:
+        # Running workers stop at chunk/copy/verification boundaries. Join them
+        # before staging or extracted source files can be removed.
+        stop.set()
+        for rp,future in pending:
+            future.cancel()
+        pool.shutdown(wait=True,cancel_futures=True)
 
 
 def _new_region_stats():
@@ -3541,12 +3668,13 @@ def _record_region_failure(report,entry):
         report["failures"].append(entry)
 
 
-def _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging):
+def _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging,cancel=None):
     report=_new_region_stats()
     chunks={}
     state_mapping_cache={}
     try:
         for idx,raw in RegionReader(rp).chunks():
+            _check_cancel(cancel)
             try:
                 (cx,cz),legacy=convert_chunk(
                     raw,reg,use_hbm,y_offset,strip_below_y,report,mapping_profile=profile,state_mapping_cache=state_mapping_cache
@@ -3554,16 +3682,20 @@ def _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging):
                 local=(cx&31)+((cz&31)*32)
                 chunks[local]=legacy
                 report["chunks_converted"]+=1
+            except ConversionCancelled:
+                raise
             except Exception as exc:
                 report["chunks_failed"]+=1
                 _record_region_failure(report,{"region":rp.name,"chunk_index":idx,"error":str(exc)})
         if chunks:
             out_region=staging/"region"/rp.name
-            write_region(out_region,chunks)
-            verified=verify_written_region(out_region,chunks.keys())
+            write_region(out_region,chunks,cancel)
+            verified=verify_written_region(out_region,chunks.keys(),cancel)
             report["regions_converted"]+=1
             report["regions_verified"]+=1
             report["chunks_verified"]+=verified
+    except ConversionCancelled:
+        raise
     except Exception as exc:
         # Region-level writer/verification problems make the staged
         # world non-promotable even if individual chunk conversion
@@ -3583,6 +3715,7 @@ def run_conversion_preflight(
     catalog_snapshot=None,
     log=print,
     workers=None,
+    cancel=None,
 ):
     """Perform the exact read-only validation required before conversion.
 
@@ -3590,6 +3723,7 @@ def run_conversion_preflight(
     ``run_conversion`` so the desktop app does not need to parse every source
     chunk twice when nothing has changed between preflight and Convert.
     """
+    _check_cancel(cancel)
     if y_offset%16 != 0:
         raise ConversionError("Vertical offset must be a multiple of 16 (e.g. -32, -16, 0, 16)")
     if not (0 <= int(strip_below_y) <= 255):
@@ -3601,18 +3735,18 @@ def run_conversion_preflight(
     registry_info=validate_target_registry(reg,use_hbm,log,mapping_profile=profile)
 
     with tempfile.TemporaryDirectory(prefix="wg1710_preflight_") as td:
-        src_regions=discover_source_regions(source,Path(td))
+        src_regions=discover_source_regions(source,Path(td),cancel)
         regions=[p for p in sorted(src_regions.glob("r.*.*.mca")) if p.stat().st_size>=8192]
         if not regions:
             raise ConversionError("Source contains no non-empty Anvil region files")
         log("Found %d non-empty region files" % len(regions))
         log("Running read-only source/target conversion preflight...")
         preflight=preflight_source_mappings(
-            regions,reg,use_hbm,y_offset,log,mapping_profile=profile,workers=workers
+            regions,reg,use_hbm,y_offset,log,mapping_profile=profile,workers=workers,cancel=cancel
         )
-        attach_content_audit(preflight,source,Path(td),log,workers)
+        attach_content_audit(preflight,source,Path(td),log,workers,cancel)
 
-    fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y)
+    fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y,cancel)
     result={
         "ready":True,
         "source":str(source),
@@ -3628,13 +3762,17 @@ def run_conversion_preflight(
         "preflight":preflight,
         "fingerprint":fingerprint,
     }
+    _check_cancel(cancel)
+    if cancel is not None:
+        cancel.commit(lambda:None)
     log("Conversion preflight READY — no output world was created.")
     return result
 
 
-def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_below_y=0, log=print, catalog_snapshot=None, verified_preflight=None, workers=None):
+def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_below_y=0, log=print, catalog_snapshot=None, verified_preflight=None, workers=None, cancel=None):
     if np is None:
         raise ConversionError("NumPy is required. Install it with: python3 -m pip install numpy")
+    _check_cancel(cancel)
     if y_offset%16 != 0:
         raise ConversionError("Vertical offset must be a multiple of 16 (e.g. -32, -16, 0, 16)")
 
@@ -3645,7 +3783,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
     # mapping profile and source palette mapping must all be known-good first.
     reg=load_target_registry(template)
     registry_info=validate_target_registry(reg,use_hbm,log,mapping_profile=profile)
-    current_fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y)
+    current_fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y,cancel)
 
     report={
         "tool_version":TOOL_VERSION,"source":str(source),"template":str(template),"output":str(output),
@@ -3802,6 +3940,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
 
     def write_reports(directory: Path, json_name="WG_BACKPORT_REPORT.json", txt_name="WG_BACKPORT_REPORT.txt"):
         directory=Path(directory); directory.mkdir(parents=True,exist_ok=True)
+        _check_cancel(cancel)
         serial=serialise_report()
         (directory/json_name).write_text(json.dumps(serial,indent=2,sort_keys=True),encoding="utf-8")
         (directory/txt_name).write_text("\n".join(report_lines(serial))+"\n",encoding="utf-8")
@@ -3811,7 +3950,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
     try:
         with tempfile.TemporaryDirectory(prefix="wg1710_") as td:
             td=Path(td)
-            src_regions=discover_source_regions(source,td)
+            src_regions=discover_source_regions(source,td,cancel)
             regions=[p for p in sorted(src_regions.glob("r.*.*.mca")) if p.stat().st_size>=8192]
             report["regions_total"]=len(regions)
             if not regions:
@@ -3834,9 +3973,9 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
                 else:
                     log("Running source/target mapping preflight before output staging...")
                 report["preflight"]=preflight_source_mappings(
-                    regions,reg,use_hbm,y_offset,log,mapping_profile=profile,workers=workers
+                    regions,reg,use_hbm,y_offset,log,mapping_profile=profile,workers=workers,cancel=cancel
                 )
-                attach_content_audit(report["preflight"],source,td,log,workers)
+                attach_content_audit(report["preflight"],source,td,log,workers,cancel)
 
             content=(report["preflight"] or {}).get("content_audit") or {}
             report["entities_omitted"]=content.get("entities_total")
@@ -3846,12 +3985,13 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             # Conversion writes only into a hidden sibling staging world. The
             # requested output path is promoted only after zero chunk failures
             # and a full region round-trip structural verification.
-            staging=_prepare_staging_output(template,output)
+            _check_cancel(cancel)
+            staging=_prepare_staging_output(template,output,cancel)
             log("Preflight is green; created a hidden staging clone and starting conversion.")
 
             count=region_worker_count(workers,len(regions))
             log("Conversion using %d worker process(es)"%count)
-            for ri,(rp,part) in enumerate(_region_results("convert",regions,reg,use_hbm,y_offset,strip_below_y,profile,count,staging),1):
+            for ri,(rp,part) in enumerate(_region_results("convert",regions,reg,use_hbm,y_offset,strip_below_y,profile,count,staging,cancel),1):
                 for key,value in part.items():
                     if key == "failures":
                         report[key].extend(value[:max(0,max_failure_examples-len(report[key]))])
@@ -3867,6 +4007,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
                 if part["chunks_failed"]:
                     log("  REGION FAILED/UNVERIFIED: %s"%rp.name)
 
+            _check_cancel(cancel)
             if report["chunks_failed"] or report["regions_verified"] != report["regions_converted"] or report["chunks_verified"] != report["chunks_converted"]:
                 report["output_promoted"]=False
                 fail_json=output.parent/(output.name+".WG_BACKPORT_FAILED_REPORT.json")
@@ -3882,9 +4023,13 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
                 log("Failure report: %s"%fail_txt)
                 return serial
 
+            _check_cancel(cancel)
             report["output_promoted"]=True
             serial,_,_=write_reports(staging)
-            _promote_staging_output(staging,output)
+            if cancel is None:
+                _promote_staging_output(staging,output)
+            else:
+                cancel.commit(lambda:_promote_staging_output(staging,output))
             staging=None
             log("Staged world passed round-trip verification and was promoted to: %s"%output)
             log("Finished: %d chunks, 0 failures"%report["chunks_converted"])
@@ -3946,6 +4091,8 @@ def gui():
     try:
         import tkinter as tk
         from tkinter import filedialog, messagebox
+    except ConversionCancelled:
+        raise
     except Exception as e:
         print("Tk GUI unavailable:",e); cli(); return
     root=tk.Tk(); root.title("WG Modern -> Minecraft 1.7.10 Map Backporter"); root.geometry("860x620")
@@ -3974,6 +4121,8 @@ def gui():
     def start():
         try:
             yi=int(yoff.get()); sb=int(strip.get())
+        except ConversionCancelled:
+            raise
         except Exception: messagebox.showerror("Invalid setting","Vertical offset and strip Y must be integers."); return
         if not src.get() or not tmpl.get() or not out.get(): messagebox.showerror("Missing path","Select source, template world, and output folder."); return
         btn.config(state="disabled")
@@ -3981,6 +4130,8 @@ def gui():
             try:
                 run_conversion(src.get(),tmpl.get(),out.get(),hbm.get(),yi,sb,log)
                 root.after(0,lambda:messagebox.showinfo("Backport complete","Conversion finished. Check WG_BACKPORT_REPORT.txt in the output world before using it."))
+            except ConversionCancelled:
+                raise
             except Exception as e:
                 log(traceback.format_exc()); root.after(0,lambda:messagebox.showerror("Conversion failed",str(e)))
             finally: root.after(0,lambda:btn.config(state="normal"))

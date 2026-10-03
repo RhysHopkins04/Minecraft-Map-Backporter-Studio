@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from .. import APP_NAME, __version__
 from ..core.catalog import load_catalog
 from ..core.jar_analyzer import analyze_jar, build_inventory_preview_spec, build_preview_spec, read_asset_bytes
-from ..core.legacy1710_engine import run_conversion, run_conversion_preflight, region_worker_count
+from ..core.legacy1710_engine import run_conversion, run_conversion_preflight, region_worker_count, CancellationToken, ConversionCancelled
 from ..core.modpack_analyzer import analyze_modpack
 from ..core.version_targets import TARGETS
 from ..core.workspace_store import WorkspaceStore
@@ -30,6 +30,7 @@ from ..core.workspace_store import WorkspaceStore
 class FunctionWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
+    cancelled = Signal()
     log_line = Signal(str)
 
     def __init__(self, fn):
@@ -40,6 +41,8 @@ class FunctionWorker(QObject):
         try:
             result = self.fn(self.log_line.emit)
             self.finished.emit(result)
+        except ConversionCancelled:
+            self.cancelled.emit()
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -686,18 +689,20 @@ class DashboardTab(QWidget):
 class AsyncTab(QWidget):
     def __init__(self):
         super().__init__(); self._thread = None; self._worker = None
-        self._done_cb = None; self._error_cb = None; self._log_cb = None
+        self._done_cb = None; self._error_cb = None; self._log_cb = None; self._cancelled_cb = None
 
-    def launch(self, fn, on_done, on_error=None, log=None):
+    def launch(self, fn, on_done, on_error=None, log=None, on_cancelled=None):
         if self._thread is not None:
             return
         self._done_cb, self._error_cb, self._log_cb = on_done, on_error, log
+        self._cancelled_cb = on_cancelled
         self._thread = QThread(self); self._worker = FunctionWorker(fn); self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         # These receivers are methods on this QWidget, so Qt queues them back to the GUI thread.
         self._worker.log_line.connect(self._dispatch_log)
         self._worker.finished.connect(self._dispatch_done)
         self._worker.failed.connect(self._dispatch_failed)
+        self._worker.cancelled.connect(self._dispatch_cancelled)
         self._thread.start()
 
     @Slot(str)
@@ -719,12 +724,20 @@ class AsyncTab(QWidget):
         finally:
             self._cleanup_thread()
 
+    @Slot()
+    def _dispatch_cancelled(self):
+        try:
+            if self._cancelled_cb:
+                self._cancelled_cb()
+        finally:
+            self._cleanup_thread()
+
     def _cleanup_thread(self):
         if self._thread:
             self._thread.quit(); self._thread.wait(1500); self._thread.deleteLater()
         if self._worker: self._worker.deleteLater()
         self._thread = None; self._worker = None
-        self._done_cb = None; self._error_cb = None; self._log_cb = None
+        self._done_cb = None; self._error_cb = None; self._log_cb = None; self._cancelled_cb = None
 
 
 class BackportTab(AsyncTab):
@@ -883,12 +896,20 @@ class BackportTab(AsyncTab):
         self.convert_btn.setObjectName("primary")
         buttons.addWidget(self.scan_btn)
         buttons.addStretch()
+        self.cancel_btn = QPushButton("Cancel task")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setToolTip("Stop the current preflight or conversion, then remove temporary and unpromoted files.")
+        buttons.addWidget(self.cancel_btn)
         buttons.addWidget(self.convert_btn)
         body.addLayout(buttons)
 
         self.timing_status = _muted("Elapsed 00:00:00  •  Remaining —")
         self.timing_status.setWordWrap(True)
         body.addWidget(self.timing_status)
+        self._cancel_token = None
+        self._cancel_requested = False
+        self._timing_outcome = "Stopped"
+        self._active_operation = None
         self._timing_started = None
         self._phase_started = None
         self._timing_running = False
@@ -915,6 +936,7 @@ class BackportTab(AsyncTab):
 
         self.scan_btn.clicked.connect(self.scan_source)
         self.convert_btn.clicked.connect(self.convert)
+        self.cancel_btn.clicked.connect(self.cancel_task)
         self.recommended_btn.clicked.connect(self._apply_recommended)
         self.version.currentIndexChanged.connect(self._target_changed)
         self.source.textChanged.connect(self._invalidate_preflight)
@@ -1043,7 +1065,9 @@ class BackportTab(AsyncTab):
             self._elapsed=now-self._timing_started
         text="Elapsed %s"%self._duration(self._elapsed)
         if not self._timing_running:
-            text += "  •  Stopped"
+            text += "  •  " + self._timing_outcome
+        elif self._cancel_requested:
+            text += "  •  Cancelling… stopping workers and cleaning up"
         elif self._phase_done and self._phase_total:
             age=max(0.001,now-self._phase_started)
             rate=self._phase_done/age
@@ -1059,7 +1083,12 @@ class BackportTab(AsyncTab):
 
     def _set_busy(self, busy: bool):
         self.region_workers.setEnabled(not busy)
+        self.cancel_btn.setEnabled(busy)
+        self.cancel_btn.setText("Cancel task")
         if busy:
+            self._cancel_token=CancellationToken()
+            self._cancel_requested=False
+            self._timing_outcome="Stopped"
             self._timing_started=time.monotonic()
             self._phase_started=self._timing_started
             self._elapsed=0
@@ -1078,6 +1107,43 @@ class BackportTab(AsyncTab):
         self.progress.setRange(0, 0 if busy else 1)
         if not busy:
             self.progress.setValue(1)
+
+    def cancel_task(self):
+        if not self._timing_running or self._cancel_token is None or self._cancel_requested:
+            return
+        self.cancel_btn.setEnabled(False)
+        if not self._cancel_token.cancel():
+            self._log("Task has already completed; waiting for the final result.")
+            return
+        self._cancel_requested=True
+        self.cancel_btn.setText("Cancelling…")
+        self.preflight_status.setText("Cancellation requested — stopping work and removing temporary/unpromoted files…")
+        self._log("Cancellation requested. Waiting for workers to stop and cleanup to finish…")
+        self._refresh_timing()
+
+    def _task_cancelled(self):
+        if self._active_operation == "preflight":
+            self._preflight_result=None
+            self._preflight_token=None
+        self._timing_outcome="Cancelled"
+        self._set_busy(False)
+        if self._phase_total:
+            self.progress.setRange(0,self._phase_total)
+            self.progress.setValue(self._phase_done)
+        else:
+            self.progress.setValue(0)
+        ready=self._preflight_valid()
+        if self._active_operation == "conversion":
+            message="Conversion cancelled — unpromoted output and temporary files removed."
+            if ready:
+                message += " Verified preflight remains ready; you can retry Convert map."
+            else:
+                message += " Run preflight again before conversion."
+        else:
+            message="Preflight cancelled — temporary files removed; no output world created."
+        self.preflight_status.setText(message)
+        self._log(message)
+        self._active_operation=None
 
     def _log(self, s):
         line=str(s)
@@ -1128,7 +1194,9 @@ class BackportTab(AsyncTab):
         self._preflight_result = None
         self._preflight_token = None
         self.preflight_status.setText("Preflight running… no output world will be created.")
+        self._active_operation="preflight"
         self._set_busy(True)
+        cancel=self._cancel_token
 
         def work(log):
             return run_conversion_preflight(
@@ -1140,6 +1208,7 @@ class BackportTab(AsyncTab):
                 catalog_snapshot=snapshot,
                 log=log,
                 workers=workers,
+                cancel=cancel,
             )
 
         def done(rep):
@@ -1233,7 +1302,7 @@ class BackportTab(AsyncTab):
             self._log(tb)
             QMessageBox.critical(self, "Conversion preflight failed", tb)
 
-        self.launch(work, done, err, self._log)
+        self.launch(work, done, err, self._log, self._task_cancelled)
 
     def convert(self):
         t = self.version.currentData()
@@ -1273,7 +1342,9 @@ class BackportTab(AsyncTab):
         workers = self.region_workers.value() or None
 
         self.log.clear()
+        self._active_operation="conversion"
         self._set_busy(True)
+        cancel=self._cancel_token
 
         def work(log):
             return run_conversion(
@@ -1287,6 +1358,7 @@ class BackportTab(AsyncTab):
                 catalog_snapshot=snapshot,
                 verified_preflight=verified,
                 workers=workers,
+                cancel=cancel,
             )
 
         def done(rep):
@@ -1344,7 +1416,7 @@ class BackportTab(AsyncTab):
             self._log(tb)
             QMessageBox.critical(self, "Conversion failed", tb)
 
-        self.launch(work, done, err, self._log)
+        self.launch(work, done, err, self._log, self._task_cancelled)
 
 
 class JarAnalyzerTab(AsyncTab):
