@@ -843,6 +843,12 @@ class BackportTab(AsyncTab):
             "Prefer Et Futurum blocks detected directly in the target/template Forge registry, then exact registered blocks from enabled "
             "backport-provider catalogs, then reviewed architectural/decorative rules. The target registry remains authoritative."
         )
+        self.efr_extended_height = QCheckBox("EFR Plus extended Overworld height (0..383)")
+        self.efr_extended_height.setChecked(False)
+        self.efr_extended_height.setToolTip(
+            "Use only with Et Futurum Requiem Plus extendedWorldHeight=true. This emits 24 legacy-style chunk sections "
+            "and fixes the vertical offset to +64 so modern Y -64..319 maps exactly to physical Y 0..383."
+        )
         self.catalog_status = _muted("")
         self.yoff = QSpinBox()
         self.yoff.setRange(-192, 192)
@@ -858,28 +864,26 @@ class BackportTab(AsyncTab):
         self.recommended_status = _muted("")
 
         og.addWidget(self.hbm, 0, 0, 1, 2)
-        og.addWidget(self.catalog_status, 1, 0, 1, 2)
-        og.addWidget(QLabel("Vertical offset"), 2, 0)
-        og.addWidget(self.yoff, 2, 1)
-        og.addWidget(QLabel("Strip/fill below target Y"), 3, 0)
-        og.addWidget(self.strip, 3, 1)
+        og.addWidget(self.efr_extended_height, 1, 0, 1, 2)
+        og.addWidget(self.catalog_status, 2, 0, 1, 2)
+        og.addWidget(QLabel("Vertical offset"), 3, 0)
+        og.addWidget(self.yoff, 3, 1)
+        og.addWidget(QLabel("Strip/fill below target Y"), 4, 0)
+        og.addWidget(self.strip, 4, 1)
         recommended_row = QHBoxLayout()
         recommended_row.addWidget(self.recommended_btn)
         recommended_row.addWidget(self.recommended_status, 1)
-        og.addLayout(recommended_row, 4, 0, 1, 2)
-        og.addWidget(
-            _muted(
-                "For 1.7.10, source blocks below Y=0 or above Y=255 cannot be represented. "
-                "The recommended 0 / 0 profile preserves normal RTG and sea-level alignment."
-            ),
-            5, 0, 1, 2,
+        og.addLayout(recommended_row, 5, 0, 1, 2)
+        self.height_profile_note = _muted(
+            "Legacy 1.7.10 profile: target Y 0..255. Source blocks outside that range after the selected offset are cropped."
         )
+        og.addWidget(self.height_profile_note, 6, 0, 1, 2)
         self.region_workers = QSpinBox()
         self.region_workers.setRange(0, 16)
         self.region_workers.setSpecialValueText("Automatic (%d workers)" % region_worker_count())
         self.region_workers.setToolTip("Automatic uses up to four CPU processes. Use 1 for serial processing or lower memory use; higher counts need more RAM and disk throughput.")
-        og.addWidget(QLabel("Region workers"), 6, 0)
-        og.addWidget(self.region_workers, 6, 1)
+        og.addWidget(QLabel("Region workers"), 7, 0)
+        og.addWidget(self.region_workers, 7, 1)
         body.addWidget(opts)
 
         status_group = QGroupBox("Conversion preflight")
@@ -944,6 +948,7 @@ class BackportTab(AsyncTab):
         self.yoff.valueChanged.connect(self._invalidate_preflight)
         self.strip.valueChanged.connect(self._invalidate_preflight)
         self.hbm.stateChanged.connect(self._invalidate_preflight)
+        self.efr_extended_height.stateChanged.connect(self._height_profile_changed)
 
         self._target_changed()
         self._refresh_catalog_status()
@@ -981,6 +986,7 @@ class BackportTab(AsyncTab):
             "allow_safe_mod_replacements": bool(self.hbm.isChecked()),
             "vertical_offset": int(self.yoff.value()),
             "strip_below_y": int(self.strip.value()),
+            "efr_extended_height": bool(self.efr_extended_height.isChecked()),
             "catalog_snapshot": self._catalog_snapshot(),
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -1034,9 +1040,44 @@ class BackportTab(AsyncTab):
         else:
             self.recommended_btn.setEnabled(False)
             self.recommended_status.setText("No automatic recommendation is defined for this planned target yet.")
+        self.efr_extended_height.setEnabled(t.version == "1.7.10")
+        self._height_profile_changed(invalidate=False)
         self._invalidate_preflight()
 
+    def _height_profile_changed(self, *_args, invalidate=True):
+        extended = bool(self.efr_extended_height.isChecked())
+        if extended:
+            self.yoff.setValue(64)
+            self.yoff.setEnabled(False)
+            self.strip.setMaximum(383)
+            self.recommended_status.setText(
+                "EFR Plus extended profile: vertical offset +64, target Y 0..383; modern Y -64..319 is preserved in full."
+            )
+            self.height_profile_note.setText(
+                "Requires Et Futurum Requiem Plus with extendedWorldHeight=true (and Map Compatibility Mode off). "
+                "The converter writes 24 sections Y=0..23 and HeightMap values up to 384."
+            )
+        else:
+            self.yoff.setEnabled(True)
+            self.strip.setMaximum(255)
+            t = self.version.currentData()
+            if t.recommended_y_offset is not None and t.recommended_strip_below_y is not None:
+                self.recommended_status.setText(
+                    f"{t.version} recommended surface profile: vertical offset {t.recommended_y_offset}, "
+                    f"strip/fill below Y {t.recommended_strip_below_y}."
+                )
+            self.height_profile_note.setText(
+                "Legacy 1.7.10 profile: target Y 0..255. Source blocks outside that range after the selected offset are cropped."
+            )
+        if invalidate:
+            self._invalidate_preflight()
+
     def _apply_recommended(self):
+        if self.efr_extended_height.isChecked():
+            self.yoff.setValue(64)
+            self.strip.setValue(0)
+            self._invalidate_preflight()
+            return
         t = self.version.currentData()
         if t.recommended_y_offset is None or t.recommended_strip_below_y is None:
             return
@@ -1189,6 +1230,7 @@ class BackportTab(AsyncTab):
         yoff = self.yoff.value()
         strip = self.strip.value()
         workers = self.region_workers.value() or None
+        extended_height = self.efr_extended_height.isChecked()
 
         self.log.clear()
         self._preflight_result = None
@@ -1209,6 +1251,7 @@ class BackportTab(AsyncTab):
                 log=log,
                 workers=workers,
                 cancel=cancel,
+                efr_extended_height=extended_height,
             )
 
         def done(rep):
@@ -1249,6 +1292,7 @@ class BackportTab(AsyncTab):
             self.preflight_status.setText(
                 f"READY • {rep.get('regions', 0):,} regions • {p.get('chunks', 0):,} chunks • "
                 f"{p.get('unique_palette_states', 0):,} unique in-range palette states • "
+                f"target Y 0..{int(p.get('target_max_y', 255) or 255)} • "
                 f"{exact_pct:.1f}% exact by placed blocks • {state_pct:.1f}% verified state fidelity • {provider_text} • "
                 f"{be_count:,} block entities • {entity_text} • "
                 f"{len(profile.get('enabled_catalogs') or []):,} enabled catalog(s){warning}"
@@ -1290,6 +1334,9 @@ class BackportTab(AsyncTab):
                 f"Mapping impact is {exact_pct:.2f}% exact/backport-exact across placed in-range non-air blocks; "
                 f"verified state fidelity is {state_pct:.2f}% across placed blocks that carry source properties; "
                 f"{provider_registered_targets:,}/{provider_catalog_targets:,} catalog backport target(s) are actually registered in the selected template. "
+                f"The target height profile is Y 0..{int(p.get('target_max_y', 255) or 255)} with vertical offset {int(rep.get('settings',{}).get('vertical_offset',0) or 0):+d}; "
+                f"{int(p.get('potential_chunks_cropped_above_target_y',0) or 0):,} chunk(s) may crop above the target and "
+                f"{int(p.get('potential_chunks_cropped_below_0',0) or 0):,} below it. "
                 f"The log lists the highest-impact non-exact mappings.{unavailable_line}{content_line} "
                 "Output chunks will request a target-side relight. No output world was created. Convert map is now enabled.",
             )
@@ -1340,6 +1387,7 @@ class BackportTab(AsyncTab):
         yoff = self.yoff.value()
         strip = self.strip.value()
         workers = self.region_workers.value() or None
+        extended_height = self.efr_extended_height.isChecked()
 
         self.log.clear()
         self._active_operation="conversion"
@@ -1359,6 +1407,7 @@ class BackportTab(AsyncTab):
                 verified_preflight=verified,
                 workers=workers,
                 cancel=cancel,
+                efr_extended_height=extended_height,
             )
 
         def done(rep):
@@ -1374,7 +1423,7 @@ class BackportTab(AsyncTab):
                             "chunks_converted",
                             "chunks_verified",
                             "chunks_failed",
-                            "chunks_cropped_above_255",
+                            "chunks_cropped_above_target_y",
                             "chunks_cropped_below_0",
                             "block_entities_omitted",
                             "entities_omitted",

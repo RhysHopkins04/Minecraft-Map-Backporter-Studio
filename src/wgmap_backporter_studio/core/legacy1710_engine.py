@@ -47,6 +47,43 @@ TOOL_VERSION = "0.2.3"
 SOURCE_FORMAT_REVISION = 2
 AIR_NAMES = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
 
+LEGACY_TARGET_MIN_Y = 0
+LEGACY_TARGET_MAX_Y = 255
+EFR_EXTENDED_TARGET_MAX_Y = 383
+EFR_EXTENDED_SECTION_COUNT = 24
+EFR_MODERN_Y_OFFSET = 64
+
+def target_max_y(efr_extended_height=False):
+    return EFR_EXTENDED_TARGET_MAX_Y if efr_extended_height else LEGACY_TARGET_MAX_Y
+
+def target_section_count(efr_extended_height=False):
+    return EFR_EXTENDED_SECTION_COUNT if efr_extended_height else 16
+
+def _validate_height_mode(reg, y_offset, strip_below_y, efr_extended_height, log=print):
+    max_y=target_max_y(efr_extended_height)
+    if int(y_offset) % 16 != 0:
+        raise ConversionError("Vertical offset must be a multiple of 16 (e.g. -32, -16, 0, 16)")
+    if efr_extended_height:
+        if int(y_offset) != EFR_MODERN_Y_OFFSET:
+            raise ConversionError(
+                "EFR Plus extended-height conversion requires the fixed +64 vertical offset "
+                "so modern Y -64..319 maps to physical Y 0..383."
+            )
+        if reg.namespace_count(ET_FUTURUM_NAMESPACE) <= 0:
+            raise ConversionError(
+                "EFR Plus extended-height conversion was selected, but the target/template registry "
+                "contains no etfuturum blocks. Open and save the template with the matching EFR Plus build first."
+            )
+        log(
+            "Target height profile: EFR Plus extended Overworld 0..383 (24 sections); "
+            "modern Y -64..319 maps to physical Y 0..383 using +64."
+        )
+    else:
+        log("Target height profile: legacy Forge 1.7.10 Y 0..255 (16 sections).")
+    if not (0 <= int(strip_below_y) <= max_y):
+        raise ConversionError("Strip/fill below target Y must be between 0 and %d" % max_y)
+    return max_y
+
 # Patch 013 keeps conversion correctness conservative: terrain/block states are
 # converted, while modern entities and block entities are audited and reported
 # instead of being silently discarded. Legacy output chunks are emitted with
@@ -2384,6 +2421,7 @@ def _scan_preflight_regions(
     log=print,
     mapping_profile: MappingProfile | None = None,
     cancel=None,
+    target_max_y_value=LEGACY_TARGET_MAX_Y,
 ):
     """Resolve every in-range unique source palette mapping before output exists.
 
@@ -2430,16 +2468,16 @@ def _scan_preflight_regions(
                         if sy is None: continue
                         target_base=sy*16+y_offset
                         states,inds=_source_section_states(section,c.get("DataVersion"),
-                            decode_indices=not (target_base>255 or target_base+15<0))
+                            decode_indices=not (target_base>target_max_y_value or target_base+15<0))
                         if not states: continue
                         source_ymin=min(source_ymin,sy); source_ymax=max(source_ymax,sy)
                         has_non_air=any(
                             (st.get("legacy_id",0) != 0) if st.get("kind")=="legacy_numeric" else st.get("name") not in AIR_NAMES
                             for st in states
                         )
-                        if target_base>255 or target_base+15<0:
+                        if target_base>target_max_y_value or target_base+15<0:
                             if has_non_air:
-                                if target_base>255: chunk_high=True
+                                if target_base>target_max_y_value: chunk_high=True
                                 else: chunk_low=True
                             continue
 
@@ -2548,6 +2586,7 @@ def preflight_source_mappings(
     mapping_profile: MappingProfile | None = None,
     workers=None,
     cancel=None,
+    target_max_y_value=LEGACY_TARGET_MAX_Y,
 ):
     """Resolve every in-range unique source palette mapping before output exists.
 
@@ -2571,7 +2610,7 @@ def preflight_source_mappings(
     regions=list(regions)
     count=region_worker_count(workers,len(regions))
     log("Preflight using %d worker process(es)"%count)
-    for ri,(rp,part) in enumerate(_region_results("preflight",regions,reg,use_hbm,y_offset,0,mapping_profile,count,cancel=cancel),1):
+    for ri,(rp,part) in enumerate(_region_results("preflight",regions,reg,use_hbm,y_offset,0,mapping_profile,count,cancel=cancel,target_max_y_value=target_max_y_value),1):
         chunks+=part["chunks"]
         block_occurrences_total+=part["block_occurrences_total"]
         stateful_occurrences_total+=part["stateful_occurrences_total"]
@@ -2661,8 +2700,14 @@ def preflight_source_mappings(
         # Preserve the old field names for callers/reports that used them.
         "section_y_min":None if source_ymin==999 else source_ymin,
         "section_y_max":None if source_ymax==-999 else source_ymax,
-        "potential_chunks_cropped_above_255":crop_high_chunks,
+        "target_min_y":0,
+        "target_max_y":int(target_max_y_value),
+        "target_section_count":int(target_max_y_value // 16 + 1),
+        "potential_chunks_cropped_above_target_y":crop_high_chunks,
         "potential_chunks_cropped_below_0":crop_low_chunks,
+        # Backward-compatible legacy field. In extended mode, blocks between
+        # Y256..383 are representable and therefore do not count here.
+        "potential_chunks_cropped_above_255":crop_high_chunks if target_max_y_value == 255 else 0,
         "resolved_target_names":len(mapped_targets),
         "mapping_quality":{k:sorted(v) for k,v in mapping_quality.items()},
         "safe_mod_target_names":sorted(mod_targets),
@@ -2697,8 +2742,8 @@ def preflight_source_mappings(
     )
     if crop_high_chunks or crop_low_chunks:
         log(
-            "Preflight vertical-range notice: %d chunk(s) may crop above Y=255; %d chunk(s) may crop below Y=0."
-            % (crop_high_chunks,crop_low_chunks)
+            "Preflight vertical-range notice: %d chunk(s) may crop above target Y=%d; %d chunk(s) may crop below Y=0."
+            % (crop_high_chunks,target_max_y_value,crop_low_chunks)
         )
     if mod_targets:
         log(
@@ -2956,7 +3001,7 @@ def write_region(path, chunks_by_index, cancel=None):
     with path.open("wb") as f: f.write(loc); f.write(times); f.write(body)
 
 
-def validate_legacy_chunk_nbt(raw: bytes, expected_cx=None, expected_cz=None):
+def validate_legacy_chunk_nbt(raw: bytes, expected_cx=None, expected_cz=None, target_max_y_value=LEGACY_TARGET_MAX_Y):
     """Validate the structural invariants required by the legacy 1.7.10 writer."""
     try:
         _,root=parse_nbt(raw)
@@ -2983,8 +3028,9 @@ def validate_legacy_chunk_nbt(raw: bytes, expected_cx=None, expected_cz=None):
         raise ConversionError("Generated legacy chunk must keep TerrainPopulated=1 to prevent target world-generation population")
     if level.get("LightPopulated") != 0:
         raise ConversionError("Generated legacy chunk must keep LightPopulated=0 for target-side light reconciliation")
-    if any((not isinstance(v,int) or v < 0 or v > 256) for v in heightmap):
-        raise ConversionError("Generated legacy chunk HeightMap contains a value outside 0..256")
+    max_heightmap=int(target_max_y_value)+1
+    if any((not isinstance(v,int) or v < 0 or v > max_heightmap) for v in heightmap):
+        raise ConversionError("Generated legacy chunk HeightMap contains a value outside 0..%d" % max_heightmap)
 
     sections=level.get("Sections",[])
     if not isinstance(sections,list):
@@ -2994,8 +3040,9 @@ def validate_legacy_chunk_nbt(raw: bytes, expected_cx=None, expected_cz=None):
         if not isinstance(sec,dict):
             raise ConversionError("Generated legacy chunk contains a non-compound section")
         sy=sec.get("Y")
-        if not isinstance(sy,int) or not (0<=sy<=15) or sy in seen_y:
-            raise ConversionError("Generated legacy chunk has invalid/duplicate section Y=%r"%sy)
+        max_section=int(target_max_y_value)//16
+        if not isinstance(sy,int) or not (0<=sy<=max_section) or sy in seen_y:
+            raise ConversionError("Generated legacy chunk has invalid/duplicate section Y=%r for target max Y=%d"%(sy,target_max_y_value))
         seen_y.add(sy)
         expected_lengths={"Blocks":4096,"Data":2048,"BlockLight":2048,"SkyLight":2048}
         for key,length in expected_lengths.items():
@@ -3014,7 +3061,7 @@ def validate_legacy_chunk_nbt(raw: bytes, expected_cx=None, expected_cz=None):
     return {"xPos":cx,"zPos":cz,"sections":len(sections)}
 
 
-def verify_written_region(path: Path, expected_chunks, cancel=None):
+def verify_written_region(path: Path, expected_chunks, cancel=None, target_max_y_value=LEGACY_TARGET_MAX_Y):
     """Round-trip the just-written Anvil region and validate every promoted chunk."""
     expected=set(int(x) for x in expected_chunks)
     seen=set()
@@ -3022,7 +3069,7 @@ def verify_written_region(path: Path, expected_chunks, cancel=None):
         _check_cancel(cancel)
         if idx not in expected:
             raise ConversionError("Output region %s contains unexpected chunk index %d"%(Path(path).name,idx))
-        info=validate_legacy_chunk_nbt(raw)
+        info=validate_legacy_chunk_nbt(raw,target_max_y_value=target_max_y_value)
         local=(int(info["xPos"])&31)+((int(info["zPos"])&31)*32)
         if local != idx:
             raise ConversionError(
@@ -3083,7 +3130,7 @@ def choose_biomes(chunk):
             return out
     return [1]*256
 
-def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_profile: MappingProfile | None = None, state_mapping_cache=None):
+def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_profile: MappingProfile | None = None, state_mapping_cache=None, target_max_y_value=LEGACY_TARGET_MAX_Y):
     c=parse_modern_chunk(raw)
     cx,cz=c["xPos"],c["zPos"]
     if cx is None or cz is None: raise ConversionError("Chunk missing xPos/zPos")
@@ -3104,28 +3151,28 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
     if air_id is None:
         raise ConversionError("Target registry missing minecraft:air")
 
-    # First pass: convert every source section that intersects legacy 0..255 after offset.
+    # First pass: convert every source section that intersects the selected target height after offset.
     for s in c["sections"]:
         sy=s.get("Y")
         if sy is None: continue
         target_base=sy*16+y_offset
         states,inds=_source_section_states(s,c.get("DataVersion"),
-            decode_indices=not (target_base>255 or target_base+15<0))
+            decode_indices=not (target_base>target_max_y_value or target_base+15<0))
         if not states: continue
-        if target_base>255 or target_base+15<0:
+        if target_base>target_max_y_value or target_base+15<0:
             has_non_air=any(
                 (st.get("legacy_id",0) != 0) if st.get("kind")=="legacy_numeric" else st.get("name") not in AIR_NAMES
                 for st in states
             )
             if has_non_air:
-                if target_base>255: high_crop=True
+                if target_base>target_max_y_value: high_crop=True
                 else: low_crop=True
             continue
         # Offset must be section-aligned for direct section conversion.
         if y_offset % 16 != 0:
             raise ConversionError("Vertical offset must be a multiple of 16 in this build")
         ty=sy+(y_offset//16)
-        if not (0<=ty<=15): continue
+        if not (0<=ty<=target_max_y_value//16): continue
         mids=[]; mmeta=[]; state_te_specs={}
         for state_index,state in enumerate(states):
             if state_mapping_cache is None:
@@ -3202,7 +3249,10 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
         ys=np.arange(ty*16+1,ty*16+17,dtype=np.int32)[:,None,None]
         height=np.maximum(height,np.max(np.where(solid,ys,0),axis=0))
 
-    if high_crop: stats["chunks_cropped_above_255"]+=1
+    if high_crop:
+        stats["chunks_cropped_above_target_y"] = stats.get("chunks_cropped_above_target_y",0) + 1
+        if target_max_y_value == 255 and "chunks_cropped_above_255" in stats:
+            stats["chunks_cropped_above_255"]+=1
     if low_crop: stats["chunks_cropped_below_0"]+=1
 
     # Cropping changes the geometry seen by every light column in the chunk.
@@ -3265,7 +3315,7 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
         cx,cz,c.get("LastUpdate",0),converted,legacy_height,biomes,
         tile_entities=state_tile_entities,
     )
-    validate_legacy_chunk_nbt(legacy,cx,cz)
+    validate_legacy_chunk_nbt(legacy,cx,cz,target_max_y_value)
     return (cx,cz),legacy
 
 
@@ -3598,6 +3648,7 @@ def _conversion_fingerprint(
     y_offset: int,
     strip_below_y: int,
     cancel=None,
+    efr_extended_height: bool = False,
 ):
     level=(template/"level.dat").resolve()
     if not level.is_file():
@@ -3611,6 +3662,8 @@ def _conversion_fingerprint(
         "mapping_profile":profile.fingerprint_payload(),
         "vertical_offset":int(y_offset),
         "strip_below_y":int(strip_below_y),
+        "efr_extended_height":bool(efr_extended_height),
+        "target_max_y":target_max_y(efr_extended_height),
     }
     return _stable_hash(payload)
 
@@ -3626,23 +3679,23 @@ def region_worker_count(requested=None,total=None):
 _REGION_CONTEXT=None
 
 
-def _init_region_worker(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging,cancel_event):
+def _init_region_worker(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging,target_max_y_value,cancel_event):
     global _REGION_CONTEXT,_REGION_CANCEL_EVENT
-    _REGION_CONTEXT=(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging)
+    _REGION_CONTEXT=(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging,target_max_y_value)
     _REGION_CANCEL_EVENT=cancel_event
 
 
 def _region_task(rp):
     _check_cancel()
-    mode,reg,use_hbm,y_offset,strip_below_y,profile,staging=_REGION_CONTEXT
+    mode,reg,use_hbm,y_offset,strip_below_y,profile,staging,target_max_y_value=_REGION_CONTEXT
     if mode == "entities":
         return _audit_entity_region(rp)
     if mode == "preflight":
-        return _scan_preflight_regions([rp],reg,use_hbm,y_offset,lambda s:None,profile)
-    return _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging)
+        return _scan_preflight_regions([rp],reg,use_hbm,y_offset,lambda s:None,profile,target_max_y_value=target_max_y_value)
+    return _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging,target_max_y_value=target_max_y_value)
 
 
-def _region_results(mode,regions,reg,use_hbm,y_offset,strip_below_y,profile,count,staging=None,cancel=None):
+def _region_results(mode,regions,reg,use_hbm,y_offset,strip_below_y,profile,count,staging=None,cancel=None,target_max_y_value=LEGACY_TARGET_MAX_Y):
     _check_cancel(cancel)
     if count == 1:
         for rp in regions:
@@ -3650,15 +3703,15 @@ def _region_results(mode,regions,reg,use_hbm,y_offset,strip_below_y,profile,coun
             if mode == "entities":
                 part=_audit_entity_region(rp,cancel)
             elif mode == "preflight":
-                part=_scan_preflight_regions([rp],reg,use_hbm,y_offset,lambda s:None,profile,cancel)
+                part=_scan_preflight_regions([rp],reg,use_hbm,y_offset,lambda s:None,profile,cancel,target_max_y_value)
             else:
-                part=_convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging,cancel)
+                part=_convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging,cancel,target_max_y_value)
             _check_cancel(cancel)
             yield rp,part
         return
     context=multiprocessing.get_context("spawn")
     stop=context.Event()
-    args=(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging,stop)
+    args=(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging,target_max_y_value,stop)
     pool=ProcessPoolExecutor(max_workers=count,mp_context=context,
                              initializer=_init_region_worker,initargs=args)
     pending=collections.deque()
@@ -3698,6 +3751,7 @@ def _new_region_stats():
         "chunks_converted":0,
         "chunks_verified":0,
         "chunks_failed":0,
+        "chunks_cropped_above_target_y":0,
         "chunks_cropped_above_255":0,
         "chunks_cropped_below_0":0,
         "lighting_source_seed_sections":0,
@@ -3721,7 +3775,7 @@ def _record_region_failure(report,entry):
         report["failures"].append(entry)
 
 
-def _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging,cancel=None):
+def _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging,cancel=None,target_max_y_value=LEGACY_TARGET_MAX_Y):
     report=_new_region_stats()
     chunks={}
     state_mapping_cache={}
@@ -3730,7 +3784,8 @@ def _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging,cancel
             _check_cancel(cancel)
             try:
                 (cx,cz),legacy=convert_chunk(
-                    raw,reg,use_hbm,y_offset,strip_below_y,report,mapping_profile=profile,state_mapping_cache=state_mapping_cache
+                    raw,reg,use_hbm,y_offset,strip_below_y,report,mapping_profile=profile,
+                    state_mapping_cache=state_mapping_cache,target_max_y_value=target_max_y_value
                 )
                 local=(cx&31)+((cz&31)*32)
                 chunks[local]=legacy
@@ -3743,7 +3798,7 @@ def _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging,cancel
         if chunks:
             out_region=staging/"region"/rp.name
             write_region(out_region,chunks,cancel)
-            verified=verify_written_region(out_region,chunks.keys(),cancel)
+            verified=verify_written_region(out_region,chunks.keys(),cancel,target_max_y_value)
             report["regions_converted"]+=1
             report["regions_verified"]+=1
             report["chunks_verified"]+=verified
@@ -3769,6 +3824,7 @@ def run_conversion_preflight(
     log=print,
     workers=None,
     cancel=None,
+    efr_extended_height=False,
 ):
     """Perform the exact read-only validation required before conversion.
 
@@ -3777,15 +3833,13 @@ def run_conversion_preflight(
     chunk twice when nothing has changed between preflight and Convert.
     """
     _check_cancel(cancel)
-    if y_offset%16 != 0:
-        raise ConversionError("Vertical offset must be a multiple of 16 (e.g. -32, -16, 0, 16)")
-    if not (0 <= int(strip_below_y) <= 255):
-        raise ConversionError("Strip/fill below target Y must be between 0 and 255")
-
     source=Path(source); template=Path(template)
     profile=profile_from_catalog_snapshot(catalog_snapshot,bool(use_hbm))
     reg=load_target_registry(template)
     registry_info=validate_target_registry(reg,use_hbm,log,mapping_profile=profile)
+    target_max=_validate_height_mode(reg,y_offset,strip_below_y,bool(efr_extended_height),log)
+    registry_info["target_height_profile"] = "efr_plus_extended_384" if efr_extended_height else "legacy_256"
+    registry_info["target_max_y"] = target_max
 
     with tempfile.TemporaryDirectory(prefix="wg1710_preflight_") as td:
         src_regions=discover_source_regions(source,Path(td),cancel)
@@ -3795,11 +3849,12 @@ def run_conversion_preflight(
         log("Found %d non-empty region files" % len(regions))
         log("Running read-only source/target conversion preflight...")
         preflight=preflight_source_mappings(
-            regions,reg,use_hbm,y_offset,log,mapping_profile=profile,workers=workers,cancel=cancel
+            regions,reg,use_hbm,y_offset,log,mapping_profile=profile,workers=workers,cancel=cancel,
+            target_max_y_value=target_max
         )
         attach_content_audit(preflight,source,Path(td),log,workers,cancel)
 
-    fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y,cancel)
+    fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y,cancel,efr_extended_height)
     result={
         "ready":True,
         "source":str(source),
@@ -3809,6 +3864,9 @@ def run_conversion_preflight(
             "allow_safe_mod_replacements":bool(use_hbm),
             "vertical_offset":int(y_offset),
             "strip_below_y":int(strip_below_y),
+            "efr_extended_height":bool(efr_extended_height),
+            "target_min_y":0,
+            "target_max_y":target_max,
         },
         "target_registry":registry_info,
         "mapping_profile":profile.to_dict(),
@@ -3822,21 +3880,23 @@ def run_conversion_preflight(
     return result
 
 
-def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_below_y=0, log=print, catalog_snapshot=None, verified_preflight=None, workers=None, cancel=None):
+def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_below_y=0, log=print, catalog_snapshot=None, verified_preflight=None, workers=None, cancel=None, efr_extended_height=False):
     if np is None:
         raise ConversionError("NumPy is required. Install it with: python3 -m pip install numpy")
     _check_cancel(cancel)
-    if y_offset%16 != 0:
-        raise ConversionError("Vertical offset must be a multiple of 16 (e.g. -32, -16, 0, 16)")
-
     source=Path(source); template=Path(template); output=Path(output)
     profile=profile_from_catalog_snapshot(catalog_snapshot,bool(use_hbm))
 
     # Fail closed before creating even a staging clone. The target registry,
-    # mapping profile and source palette mapping must all be known-good first.
+    # mapping profile, height profile and source palette mapping must all be known-good first.
     reg=load_target_registry(template)
     registry_info=validate_target_registry(reg,use_hbm,log,mapping_profile=profile)
-    current_fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y,cancel)
+    target_max=_validate_height_mode(reg,y_offset,strip_below_y,bool(efr_extended_height),log)
+    registry_info["target_height_profile"] = "efr_plus_extended_384" if efr_extended_height else "legacy_256"
+    registry_info["target_max_y"] = target_max
+    current_fingerprint=_conversion_fingerprint(
+        source,template,reg,profile,y_offset,strip_below_y,cancel,efr_extended_height
+    )
 
     report={
         "tool_version":TOOL_VERSION,"source":str(source),"template":str(template),"output":str(output),
@@ -3845,6 +3905,9 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             "allow_safe_mod_replacements":bool(use_hbm),
             "vertical_offset":y_offset,
             "strip_below_y":strip_below_y,
+            "efr_extended_height":bool(efr_extended_height),
+            "target_min_y":0,
+            "target_max_y":target_max,
         },
         "content_policy":CONTENT_POLICY,
         "lighting_strategy":LIGHTING_STRATEGY,
@@ -3857,6 +3920,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
         "output_promoted":False,
         "regions_total":0,"regions_converted":0,"regions_verified":0,
         "chunks_converted":0,"chunks_verified":0,"chunks_failed":0,
+        "chunks_cropped_above_target_y":0,
         "chunks_cropped_above_255":0,"chunks_cropped_below_0":0,
         "lighting_source_seed_sections":0,"lighting_fallback_sections":0,
         "lighting_empty_sections_omitted":0,"lighting_emitted_sections":0,
@@ -3906,7 +3970,15 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             "Verified preflight reused: %s"%("yes" if serial.get("preflight_reused") else "no"),
             "Preflight chunks: %d"%(serial.get("preflight") or {}).get("chunks",0),
             "Preflight unique in-range palette states: %d"%(serial.get("preflight") or {}).get("unique_palette_states",0),
-            "Potential crop above Y=255: %d chunk(s)"%(serial.get("preflight") or {}).get("potential_chunks_cropped_above_255",0),
+            "Target height profile: %s (Y 0..%d)"%(
+                "EFR Plus extended" if serial.get("settings",{}).get("efr_extended_height") else "legacy 1.7.10",
+                int(serial.get("settings",{}).get("target_max_y",255) or 255),
+            ),
+            "Vertical offset: %+d"%int(serial.get("settings",{}).get("vertical_offset",0) or 0),
+            "Potential crop above target Y=%d: %d chunk(s)"%(
+                int(serial.get("settings",{}).get("target_max_y",255) or 255),
+                (serial.get("preflight") or {}).get("potential_chunks_cropped_above_target_y",0),
+            ),
             "Potential crop below Y=0: %d chunk(s)"%(serial.get("preflight") or {}).get("potential_chunks_cropped_below_0",0), "",
             "Content policy: %s"%CONTENT_POLICY,
             "Source block entities detected: %d"%int(content.get("block_entities_total",0) or 0),
@@ -3922,7 +3994,10 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             "Converted chunks: %d"%serial.get("chunks_converted",0),
             "Round-trip verified chunks: %d"%serial.get("chunks_verified",0),
             "Failed chunks: %d"%serial.get("chunks_failed",0),
-            "Chunks with source blocks cropped above Y=255: %d"%serial.get("chunks_cropped_above_255",0),
+            "Chunks with source blocks cropped above target Y=%d: %d"%(
+                int(serial.get("settings",{}).get("target_max_y",255) or 255),
+                serial.get("chunks_cropped_above_target_y",0),
+            ),
             "Chunks with source blocks cropped below Y=0: %d"%serial.get("chunks_cropped_below_0",0),
             "Lighting sections emitted to legacy storage: %d"%serial.get("lighting_emitted_sections",0),
             "Lighting sections seeded from validated source arrays: %d"%serial.get("lighting_source_seed_sections",0),
@@ -4026,7 +4101,8 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
                 else:
                     log("Running source/target mapping preflight before output staging...")
                 report["preflight"]=preflight_source_mappings(
-                    regions,reg,use_hbm,y_offset,log,mapping_profile=profile,workers=workers,cancel=cancel
+                    regions,reg,use_hbm,y_offset,log,mapping_profile=profile,workers=workers,cancel=cancel,
+                    target_max_y_value=target_max
                 )
                 attach_content_audit(report["preflight"],source,td,log,workers,cancel)
 
@@ -4044,7 +4120,7 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
 
             count=region_worker_count(workers,len(regions))
             log("Conversion using %d worker process(es)"%count)
-            for ri,(rp,part) in enumerate(_region_results("convert",regions,reg,use_hbm,y_offset,strip_below_y,profile,count,staging,cancel),1):
+            for ri,(rp,part) in enumerate(_region_results("convert",regions,reg,use_hbm,y_offset,strip_below_y,profile,count,staging,cancel,target_max),1):
                 for key,value in part.items():
                     if key == "failures":
                         report[key].extend(value[:max(0,max_failure_examples-len(report[key]))])
@@ -4129,13 +4205,21 @@ def cli(argv=None):
     c.add_argument("--output",required=True,help="new/empty output world folder")
     c.add_argument("--workers",type=int,default=None,help="region processes, 1..16; default automatic up to 4")
     c.add_argument("--no-hbm",action="store_true",help="do not use safe HBM architectural substitutes")
-    c.add_argument("--y-offset",type=int,default=0,help="vertical shift, multiple of 16; default 0")
+    c.add_argument("--y-offset",type=int,default=None,help="vertical shift, multiple of 16; defaults to 0, or +64 with --efr-extended-height")
     c.add_argument("--strip-below-y",type=int,default=0,help="replace blocks below this target Y with stone; default 0 (preserve)")
+    c.add_argument(
+        "--efr-extended-height",action="store_true",
+        help="emit EFR Plus 24-section Overworld chunks (Y 0..383); requires extendedWorldHeight=true and uses fixed +64 offset",
+    )
     a=sub.add_parser("analyze",help="inventory modern source blocks without converting")
     a.add_argument("--source",required=True); a.add_argument("--output",required=True)
     args=ap.parse_args(argv)
     if args.cmd=="convert":
-        run_conversion(args.source,args.template,args.output,not args.no_hbm,args.y_offset,args.strip_below_y,workers=args.workers)
+        resolved_y_offset = 64 if args.efr_extended_height and args.y_offset is None else (0 if args.y_offset is None else args.y_offset)
+        run_conversion(
+            args.source,args.template,args.output,not args.no_hbm,resolved_y_offset,args.strip_below_y,
+            workers=args.workers,efr_extended_height=args.efr_extended_height,
+        )
     elif args.cmd=="analyze": analyze_source(args.source,args.output)
     else: ap.print_help()
 
@@ -4149,7 +4233,7 @@ def gui():
     except Exception as e:
         print("Tk GUI unavailable:",e); cli(); return
     root=tk.Tk(); root.title("WG Modern -> Minecraft 1.7.10 Map Backporter"); root.geometry("860x620")
-    src=tk.StringVar(); tmpl=tk.StringVar(); out=tk.StringVar(); hbm=tk.BooleanVar(value=True); yoff=tk.StringVar(value="0"); strip=tk.StringVar(value="0")
+    src=tk.StringVar(); tmpl=tk.StringVar(); out=tk.StringVar(); hbm=tk.BooleanVar(value=True); extended=tk.BooleanVar(value=False); yoff=tk.StringVar(value="0"); strip=tk.StringVar(value="0")
     def row(label,var,r,kind="dir"):
         tk.Label(root,text=label,anchor="w").grid(row=r,column=0,sticky="w",padx=8,pady=5)
         tk.Entry(root,textvariable=var,width=78).grid(row=r,column=1,sticky="ew",padx=8,pady=5)
@@ -4164,10 +4248,16 @@ def gui():
     tk.Label(root,text="Backports modern region chunks into a cloned Forge 1.7.10 + HBM/RTG template world.",font=("TkDefaultFont",11,"bold")).grid(row=0,column=0,columnspan=3,sticky="w",padx=8,pady=(10,8))
     row("Modern map / region ZIP",src,1,"source"); row("1.7.10 template world",tmpl,2); row("Empty output folder",out,3)
     tk.Checkbutton(root,text="Use HBM architectural replacements (recommended; never uses HBM machines/ores)",variable=hbm).grid(row=4,column=0,columnspan=3,sticky="w",padx=8,pady=4)
-    f=tk.Frame(root); f.grid(row=5,column=0,columnspan=3,sticky="w",padx=8,pady=4)
+    def toggle_extended():
+        if extended.get(): yoff.set("64")
+    tk.Checkbutton(
+        root,text="EFR Plus extended Overworld height 0..383 (requires extendedWorldHeight=true; uses +64)",
+        variable=extended,command=toggle_extended,
+    ).grid(row=5,column=0,columnspan=3,sticky="w",padx=8,pady=4)
+    f=tk.Frame(root); f.grid(row=6,column=0,columnspan=3,sticky="w",padx=8,pady=4)
     tk.Label(f,text="Vertical offset (multiple of 16):").pack(side="left"); tk.Entry(f,textvariable=yoff,width=8).pack(side="left",padx=6)
     tk.Label(f,text="Strip/fill below Y (0 = preserve):").pack(side="left",padx=(18,0)); tk.Entry(f,textvariable=strip,width=8).pack(side="left",padx=6)
-    text=tk.Text(root,height=24,wrap="word"); text.grid(row=7,column=0,columnspan=3,sticky="nsew",padx=8,pady=8); root.rowconfigure(7,weight=1)
+    text=tk.Text(root,height=24,wrap="word"); text.grid(row=8,column=0,columnspan=3,sticky="nsew",padx=8,pady=8); root.rowconfigure(8,weight=1)
     def log(s):
         def u(): text.insert("end",str(s)+"\n"); text.see("end")
         root.after(0,u)
@@ -4181,7 +4271,7 @@ def gui():
         btn.config(state="disabled")
         def worker():
             try:
-                run_conversion(src.get(),tmpl.get(),out.get(),hbm.get(),yi,sb,log)
+                run_conversion(src.get(),tmpl.get(),out.get(),hbm.get(),yi,sb,log,efr_extended_height=extended.get())
                 root.after(0,lambda:messagebox.showinfo("Backport complete","Conversion finished. Check WG_BACKPORT_REPORT.txt in the output world before using it."))
             except ConversionCancelled:
                 raise
@@ -4189,7 +4279,7 @@ def gui():
                 log(traceback.format_exc()); root.after(0,lambda:messagebox.showerror("Conversion failed",str(e)))
             finally: root.after(0,lambda:btn.config(state="normal"))
         threading.Thread(target=worker,daemon=True).start()
-    btn=tk.Button(root,text="Convert map",command=start,height=2); btn.grid(row=6,column=0,columnspan=3,pady=6)
+    btn=tk.Button(root,text="Convert map",command=start,height=2); btn.grid(row=7,column=0,columnspan=3,pady=6)
     root.mainloop()
 
 if __name__=="__main__":
