@@ -25,6 +25,8 @@ def packaged_self_test() -> int:
 
 
 def main() -> int:
+    import multiprocessing
+    multiprocessing.freeze_support()
     if "--self-test" in sys.argv:
         return packaged_self_test()
 

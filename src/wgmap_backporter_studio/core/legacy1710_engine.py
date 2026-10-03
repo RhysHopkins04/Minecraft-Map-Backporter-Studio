@@ -20,6 +20,9 @@ import gzip
 import hashlib
 import json
 import math
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+from functools import lru_cache
 import os
 import re
 import shutil
@@ -350,6 +353,14 @@ class Reader:
         n=self.u16(); return self.read(n).decode("utf-8", "replace")
 
 
+def _read_numeric_array(r,width,code):
+    count=r.i32()
+    if count < 0:
+        raise ConversionError("Negative NBT array length")
+    raw=r.read(count*width)
+    return list(struct.unpack(">%d%s"%(count,code),raw))
+
+
 def read_payload(r: Reader, t: int):
     if t == 1: return r.i8()
     if t == 2: return r.i16()
@@ -370,9 +381,9 @@ def read_payload(r: Reader, t: int):
             name=r.string(); out[name]=read_payload(r, et)
         return out
     if t == 11:
-        n=r.i32(); return [r.i32() for _ in range(n)]
+        return _read_numeric_array(r,4,"i")
     if t == 12:
-        n=r.i32(); return [r.i64() for _ in range(n)]
+        return _read_numeric_array(r,8,"q")
     raise ConversionError("Unknown NBT tag %s" % t)
 
 
@@ -442,7 +453,7 @@ def parse_block_states(r: Reader):
             else:
                 palette=[parse_block_palette_entry(r) for _ in range(n)]
         elif k == "data" and t == 12:
-            n=r.i32(); data=[r.i64() for _ in range(n)]
+            data=_read_numeric_array(r,8,"q")
         else: skip_payload(r,t)
     return palette,data
 
@@ -459,7 +470,7 @@ def parse_biomes(r: Reader):
             else:
                 for _ in range(n): skip_payload(r,et)
         elif k == "data" and t == 12:
-            n=r.i32(); data=[r.i64() for _ in range(n)]
+            data=_read_numeric_array(r,8,"q")
         else: skip_payload(r,t)
     return palette,data
 
@@ -494,7 +505,7 @@ def parse_section(r: Reader):
         elif k == "Palette" and t == 9:
             bp=_parse_palette_list(r)
         elif k == "BlockStates" and t == 12:
-            n=r.i32(); bd=[r.i64() for _ in range(n)]
+            bd=_read_numeric_array(r,8,"q")
         elif k == "Blocks" and t == 7:
             legacy_blocks=read_payload(r,7)
         elif k == "Data" and t == 7:
@@ -591,38 +602,46 @@ def _palette_uses_padded_longs(data_version):
     except Exception:
         return True
 
-def unpack_palette_indices(data, palette_size, count, min_bits, *, padded=True):
-    if np is None: raise ConversionError("NumPy is required. Install with: python3 -m pip install numpy")
-    if palette_size <= 1 or not data:
-        return np.zeros(count, dtype=np.int32)
-    bits=max(min_bits, (palette_size-1).bit_length())
-    mask=(1<<bits)-1
-    arr=np.fromiter(((v & 0xFFFFFFFFFFFFFFFF) for v in data), dtype=np.uint64, count=len(data))
-    out=np.zeros(count, dtype=np.int32)
+@lru_cache(maxsize=128)
+def _palette_bit_layout(bits,count,padded):
     if padded:
-        vpl=64//bits
-        for slot in range(vpl):
-            dest=np.arange(slot, count, vpl)
-            if len(dest)==0: continue
-            src=np.arange(len(dest))
-            valid=src < len(arr)
-            if not np.any(valid): continue
-            vals=((arr[src[valid]] >> np.uint64(slot*bits)) & np.uint64(mask)).astype(np.int32)
-            out[dest[valid]]=vals
-    else:
-        # 1.13-1.15.2: palette entries form one continuous bit stream and may
-        # cross a long boundary.
-        for i in range(count):
-            bit=i*bits; li=bit>>6; off=bit&63
-            if li >= len(arr): break
-            value=int(arr[li] >> np.uint64(off))
-            spill=off+bits-64
-            if spill > 0 and li+1 < len(arr):
-                value |= int(arr[li+1] << np.uint64(bits-spill))
-            out[i]=value & mask
-    out[(out < 0) | (out >= palette_size)] = 0
-    return out
+        return np.arange(64//bits,dtype=np.uint64)*np.uint64(bits)
+    positions=np.arange(count,dtype=np.uint64)*np.uint64(bits)
+    word=(positions>>np.uint64(6)).astype(np.intp)
+    shift=positions & np.uint64(63)
+    return word,shift,np.uint64(64)-shift
 
+
+def unpack_palette_indices(data, palette_size, count, min_bits, *, padded=True):
+    """Decode both Anvil packing eras with bulk NumPy operations."""
+    if np is None: raise ConversionError("NumPy is required. Install with: python3 -m pip install numpy")
+    out=np.zeros(count,dtype=np.int32)
+    if palette_size <= 1 or data is None or len(data)==0:
+        return out
+    bits=max(min_bits,(palette_size-1).bit_length())
+    mask=np.uint64((1<<bits)-1)
+    try:
+        # NBT longs are signed; view their bits without Python per-word iteration.
+        arr=np.asarray(data,dtype=np.int64).view(np.uint64)
+    except (OverflowError,ValueError):
+        # Preserve support for callers supplying unsigned Python integers.
+        arr=np.fromiter((int(v)&0xFFFFFFFFFFFFFFFF for v in data),dtype=np.uint64,count=len(data))
+    layout=_palette_bit_layout(bits,count,padded)
+    if padded:
+        per_word=64//bits
+        words=arr[:(count+per_word-1)//per_word]
+        values=((words[:,None]>>layout[None,:]) & mask).reshape(-1)
+        size=min(count,len(values))
+        out[:size]=values[:size]
+    else:
+        word,shift,left=layout
+        needed=(count*bits+63)//64
+        words=np.zeros(needed+1,dtype=np.uint64)
+        available=min(needed,len(arr));words[:available]=arr[:available]
+        values=(words[word]>>shift) | (words[word+1]<<left)
+        out[:]=(values & mask).astype(np.int32)
+    out[(out < 0) | (out >= palette_size)]=0
+    return out
 
 
 PRE_FLATTEN_ADDED_BLOCKS = {
@@ -763,14 +782,14 @@ def _preflatten_to_modern_state(block_id, meta):
     return "minecraft:"+old,{}
 
 
-def _source_section_states(section, data_version):
+def _source_section_states(section, data_version, *, decode_indices=True):
     """Return normalized source states plus one state index per 4096 blocks."""
     pal=section.get("palette") or []
     if pal:
-        inds=unpack_palette_indices(
+        inds=(unpack_palette_indices(
             section.get("data"),len(pal),4096,4,
             padded=_palette_uses_padded_longs(data_version),
-        )
+        ) if decode_indices else np.empty(0,dtype=np.int32))
         return [
             {"kind":"palette","name":str(name),"props":dict(props or {})}
             for name,props in pal
@@ -815,7 +834,7 @@ def _map_source_state(state, reg, use_hbm, mapping_profile):
 def pack_nibbles(vals):
     vals=np.asarray(vals,dtype=np.uint8).reshape(-1)
     if len(vals)%2: vals=np.pad(vals,(0,1))
-    return bytes((vals[0::2] | (vals[1::2] << 4)).tolist())
+    return (vals[0::2] | (vals[1::2] << 4)).tobytes()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2240,7 +2259,7 @@ def _palette_signature(name, props):
     return (str(name), tuple(sorted((str(k), str(v)) for k,v in (props or {}).items())))
 
 
-def preflight_source_mappings(
+def _scan_preflight_regions(
     regions,
     reg: TargetRegistry,
     use_hbm=True,
@@ -2264,6 +2283,7 @@ def preflight_source_mappings(
     stateful_occurrences_total=0; stateful_preserved_occurrences=0
     crop_high_chunks=0; crop_low_chunks=0
     block_entity_types=collections.Counter()
+    embedded_entities=collections.Counter(); saw_in_chunk_entities_tag=False
     property_states=0; property_keys=collections.Counter()
 
     for ri,rp in enumerate(regions,1):
@@ -2274,6 +2294,10 @@ def preflight_source_mappings(
             for idx,raw in iterator:
                 try:
                     c=parse_modern_chunk(raw)
+                    if c.get("entities_in_chunk_present"):
+                        saw_in_chunk_entities_tag=True
+                        for ent in c.get("entities") or []:
+                            embedded_entities[str(ent.get("id") or "<unknown>") if isinstance(ent,dict) else "<malformed>"]+=1
                     chunks+=1; dvs[str(c.get("DataVersion"))]+=1
                     for be in c.get("block_entities") or []:
                         if isinstance(be,dict):
@@ -2284,10 +2308,11 @@ def preflight_source_mappings(
                     for section in c["sections"]:
                         sy=section.get("Y")
                         if sy is None: continue
-                        states,inds=_source_section_states(section,c.get("DataVersion"))
+                        target_base=sy*16+y_offset
+                        states,inds=_source_section_states(section,c.get("DataVersion"),
+                            decode_indices=not (target_base>255 or target_base+15<0))
                         if not states: continue
                         source_ymin=min(source_ymin,sy); source_ymax=max(source_ymax,sy)
-                        target_base=sy*16+y_offset
                         has_non_air=any(
                             (st.get("legacy_id",0) != 0) if st.get("kind")=="legacy_numeric" else st.get("name") not in AIR_NAMES
                             for st in states
@@ -2359,6 +2384,101 @@ def preflight_source_mappings(
             if len(parse_failures)<20:
                 parse_failures.append({"region":rp.name,"error":str(exc)})
 
+    return {
+        "chunks":chunks,
+        "block_occurrences_total":block_occurrences_total,
+        "stateful_occurrences_total":stateful_occurrences_total,
+        "stateful_preserved_occurrences":stateful_preserved_occurrences,
+        "crop_high_chunks":crop_high_chunks,
+        "crop_low_chunks":crop_low_chunks,
+        "dvs":dvs,
+        "mapping_impact":mapping_impact,
+        "quality_occurrences":quality_occurrences,
+        "unavailable_provider_impact":unavailable_provider_impact,
+        "source_occurrences":source_occurrences,
+        "block_entity_types":block_entity_types,
+        "embedded_entities":embedded_entities,
+        "unique":unique,
+        "source_ymin":source_ymin,
+        "source_ymax":source_ymax,
+        "inrange_ymin":inrange_ymin,
+        "inrange_ymax":inrange_ymax,
+        "unresolved":unresolved,
+        "parse_failures":parse_failures,
+        "mapped_targets":mapped_targets,
+        "mapping_quality":mapping_quality,
+        "mod_targets":mod_targets,
+        "mapping_cache":mapping_cache,
+        "saw_in_chunk_entities_tag":saw_in_chunk_entities_tag,
+    }
+
+
+def preflight_source_mappings(
+    regions,
+    reg: TargetRegistry,
+    use_hbm=True,
+    y_offset=0,
+    log=print,
+    mapping_profile: MappingProfile | None = None,
+    workers=None,
+):
+    """Resolve every in-range unique source palette mapping before output exists.
+
+    The preflight also estimates vertical cropping and records which reviewed mod
+    targets would be used. Palette signatures are resolved once, so repeated
+    stone/air palettes across thousands of chunks do not repeat mapping work.
+    """
+    unique=set(); chunks=0; dvs=collections.Counter()
+    source_ymin=999; source_ymax=-999; inrange_ymin=999; inrange_ymax=-999
+    unresolved={}; parse_failures=[]; mapped_targets=collections.Counter()
+    mapping_quality=collections.defaultdict(set); mod_targets=collections.Counter()
+    mapping_cache={}; mapping_impact=collections.Counter(); quality_occurrences=collections.Counter()
+    unavailable_provider_impact=collections.Counter()
+    source_occurrences=collections.Counter(); block_occurrences_total=0
+    stateful_occurrences_total=0; stateful_preserved_occurrences=0
+    crop_high_chunks=0; crop_low_chunks=0
+    block_entity_types=collections.Counter()
+    embedded_entities=collections.Counter(); saw_in_chunk_entities_tag=False
+    property_states=0; property_keys=collections.Counter()
+
+    regions=list(regions)
+    count=region_worker_count(workers,len(regions))
+    log("Preflight using %d worker process(es)"%count)
+    for ri,(rp,part) in enumerate(_region_results("preflight",regions,reg,use_hbm,y_offset,0,mapping_profile,count),1):
+        chunks+=part["chunks"]
+        block_occurrences_total+=part["block_occurrences_total"]
+        stateful_occurrences_total+=part["stateful_occurrences_total"]
+        stateful_preserved_occurrences+=part["stateful_preserved_occurrences"]
+        crop_high_chunks+=part["crop_high_chunks"]
+        crop_low_chunks+=part["crop_low_chunks"]
+        dvs.update(part["dvs"])
+        mapping_impact.update(part["mapping_impact"])
+        quality_occurrences.update(part["quality_occurrences"])
+        unavailable_provider_impact.update(part["unavailable_provider_impact"])
+        source_occurrences.update(part["source_occurrences"])
+        block_entity_types.update(part["block_entity_types"])
+        embedded_entities.update(part["embedded_entities"])
+        unique.update(part["unique"])
+        source_ymin=min(source_ymin,part["source_ymin"]); source_ymax=max(source_ymax,part["source_ymax"])
+        inrange_ymin=min(inrange_ymin,part["inrange_ymin"]); inrange_ymax=max(inrange_ymax,part["inrange_ymax"])
+        parse_failures.extend(part["parse_failures"][:max(0,20-len(parse_failures))])
+        for error,examples in part["unresolved"].items():
+            unresolved.setdefault(error,[]).extend(examples[:max(0,8-len(unresolved.get(error,[])))])
+        for quality,names in part["mapping_quality"].items():
+            mapping_quality[quality].update(names)
+        mapping_cache.update(part["mapping_cache"])
+        saw_in_chunk_entities_tag |= part["saw_in_chunk_entities_tag"]
+        log("Preflight [%d/%d] %s"%(ri,len(regions),rp.name))
+    # Unique-state statistics must be deduplicated globally across worker results.
+    for sig,(mapping,resolved,source_name,props) in mapping_cache.items():
+        mapped_targets[resolved]+=1
+        if ":" in resolved and not resolved.lower().startswith("minecraft:"):
+            mod_targets[resolved]+=1
+    for sig in unique:
+        if len(sig)==2 and sig[1]:
+            property_states+=1
+            property_keys.update(k for k,v in sig[1])
+
     if chunks == 0:
         raise ConversionError("Source preflight found no readable chunks")
     if parse_failures:
@@ -2398,6 +2518,13 @@ def preflight_source_mappings(
 
     info={
         "chunks":chunks,
+        "terrain_entity_audit":{
+            "scan_status":"scanned_in_chunk" if saw_in_chunk_entities_tag else "unavailable",
+            "entities_total":sum(embedded_entities.values()) if saw_in_chunk_entities_tag else None,
+            "entity_types":dict(embedded_entities),
+            "entity_regions":len(regions) if saw_in_chunk_entities_tag else 0,
+            "entity_chunks":chunks if saw_in_chunk_entities_tag else 0,
+        },
         "unique_palette_states":len(unique),
         "data_versions":dict(dvs),
         "source_section_y_min":None if source_ymin==999 else source_ymin,
@@ -2489,7 +2616,7 @@ def p_string(v):
     b=str(v).encode("utf-8")
     return struct.pack(">H",len(b))+b
 def p_byte_array(b): return struct.pack(">i",len(b))+bytes(b)
-def p_int_array(vals): return struct.pack(">i",len(vals))+b"".join(struct.pack(">i",int(v)) for v in vals)
+def p_int_array(vals): return struct.pack(">i",len(vals))+struct.pack(">%di"%len(vals),*(int(v) for v in vals))
 def p_list(et,payloads): return bytes([et])+struct.pack(">i",len(payloads))+b"".join(payloads)
 def p_compound(named_tags): return b"".join(named_tags)+b"\x00"
 
@@ -2626,11 +2753,11 @@ def derive_heightmap_from_skylight(section_skylight, fallback_height):
         light=_validated_light_array(packed)
         if light is None: continue
         vals=unpack_nibbles(light).reshape(16,16,16)
-        for ly in range(15,-1,-1):
-            below=(vals[ly] < 15) & (~known)
-            if np.any(below):
-                result[below]=ty*16+ly+1
-                known[below]=True
+        below=vals < 15
+        has_below=np.any(below,axis=0) & (~known)
+        top=15-np.argmax(below[::-1],axis=0)
+        result[has_below]=(ty*16+top+1)[has_below]
+        known |= has_below
         if np.all(known): break
     return result
 
@@ -2821,7 +2948,7 @@ def choose_biomes(chunk):
             return out
     return [1]*256
 
-def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_profile: MappingProfile | None = None):
+def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_profile: MappingProfile | None = None, state_mapping_cache=None):
     c=parse_modern_chunk(raw)
     cx,cz=c["xPos"],c["zPos"]
     if cx is None or cz is None: raise ConversionError("Chunk missing xPos/zPos")
@@ -2846,9 +2973,10 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
     for s in c["sections"]:
         sy=s.get("Y")
         if sy is None: continue
-        states,inds=_source_section_states(s,c.get("DataVersion"))
-        if not states: continue
         target_base=sy*16+y_offset
+        states,inds=_source_section_states(s,c.get("DataVersion"),
+            decode_indices=not (target_base>255 or target_base+15<0))
+        if not states: continue
         if target_base>255 or target_base+15<0:
             has_non_air=any(
                 (st.get("legacy_id",0) != 0) if st.get("kind")=="legacy_numeric" else st.get("name") not in AIR_NAMES
@@ -2865,9 +2993,16 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
         if not (0<=ty<=15): continue
         mids=[]; mmeta=[]; state_te_specs={}
         for state_index,state in enumerate(states):
-            mp,rid,meta,resolved,source_name,props=_map_source_state(
-                state,reg,use_hbm,mapping_profile
-            )
+            if state_mapping_cache is None:
+                mapped=_map_source_state(state,reg,use_hbm,mapping_profile)
+            else:
+                sig=(_palette_signature(state["name"],state.get("props")) if state.get("kind")=="palette"
+                     else ("legacy_numeric",int(state.get("legacy_id",0)),int(state.get("legacy_meta",0))))
+                mapped=state_mapping_cache.get(sig)
+                if mapped is None:
+                    mapped=_map_source_state(state,reg,use_hbm,mapping_profile)
+                    state_mapping_cache[sig]=mapped
+            mp,rid,meta,resolved,source_name,props=mapped
             mids.append(rid); mmeta.append(meta)
             resolved_lower=str(resolved).lower()
             source_path=str(source_name).split(":",1)[-1].lower()
@@ -2928,10 +3063,8 @@ def convert_chunk(raw, reg, use_hbm, y_offset, strip_below_y, stats, mapping_pro
         # serialized. It is no longer used as the primary lighting boundary.
         a=ids.reshape(16,16,16)
         solid=a != air_id
-        for ly in range(16):
-            yy=ty*16+ly+1
-            m=solid[ly]
-            height=np.where(m,np.maximum(height,yy),height)
+        ys=np.arange(ty*16+1,ty*16+17,dtype=np.int32)[:,None,None]
+        height=np.maximum(height,np.max(np.where(solid,ys,0),axis=0))
 
     if high_crop: stats["chunks_cropped_above_255"]+=1
     if low_crop: stats["chunks_cropped_below_0"]+=1
@@ -3090,8 +3223,37 @@ def discover_source_entity_regions(source: Path, tempdir: Path):
     return None
 
 
-def audit_source_entities(source: Path, tempdir: Path, log=print):
+def _audit_entity_region(rp):
+    counts=collections.Counter(); chunks=0; failures=[]
+    try:
+        for idx,raw in RegionReader(rp).chunks():
+            chunks+=1
+            try:
+                _,root=parse_nbt(raw)
+                entities=[]
+                if isinstance(root,dict):
+                    entities=root.get("Entities",root.get("entities",[])) or []
+                if not isinstance(entities,list):
+                    raise ConversionError("Entity chunk Entities tag is not a list")
+                for ent in entities:
+                    if isinstance(ent,dict):
+                        counts[str(ent.get("id") or "<unknown>")]+=1
+                    else:
+                        counts["<malformed>"]+=1
+            except Exception as exc:
+                if len(failures)<20:
+                    failures.append({"region":rp.name,"chunk_index":idx,"error":str(exc)})
+    except Exception as exc:
+        if len(failures)<20:
+            failures.append({"region":rp.name,"error":str(exc)})
+    return counts,chunks,failures
+
+
+def audit_source_entities(source: Path, tempdir: Path, log=print, terrain_audit=None, workers=None):
     entity_dir=discover_source_entity_regions(Path(source),tempdir)
+    if entity_dir is None and terrain_audit is not None:
+        log("Content audit: reusing entity records inspected during terrain preflight.")
+        return dict(terrain_audit)
     if entity_dir is None:
         # Java 1.8-1.16-era worlds keep entities inside terrain chunks instead
         # of a separate entities/ region tree. Scan those only when the source
@@ -3139,31 +3301,14 @@ def audit_source_entities(source: Path, tempdir: Path, log=print):
         }
 
     counts=collections.Counter(); chunks=0; regions=0; failures=[]
-    for rp in sorted(entity_dir.glob("r.*.*.mca")):
-        if not rp.is_file() or rp.stat().st_size<8192:
-            continue
-        regions+=1
-        try:
-            for idx,raw in RegionReader(rp).chunks():
-                chunks+=1
-                try:
-                    _,root=parse_nbt(raw)
-                    entities=[]
-                    if isinstance(root,dict):
-                        entities=root.get("Entities",root.get("entities",[])) or []
-                    if not isinstance(entities,list):
-                        raise ConversionError("Entity chunk Entities tag is not a list")
-                    for ent in entities:
-                        if isinstance(ent,dict):
-                            counts[str(ent.get("id") or "<unknown>")]+=1
-                        else:
-                            counts["<malformed>"]+=1
-                except Exception as exc:
-                    if len(failures)<20:
-                        failures.append({"region":rp.name,"chunk_index":idx,"error":str(exc)})
-        except Exception as exc:
-            if len(failures)<20:
-                failures.append({"region":rp.name,"error":str(exc)})
+    paths=[p for p in sorted(entity_dir.glob("r.*.*.mca")) if p.is_file() and p.stat().st_size>=8192]
+    count=region_worker_count(workers,len(paths))
+    log("Entity audit using %d worker process(es)"%count)
+    for regions,(rp,part) in enumerate(_region_results("entities",paths,None,False,0,0,None,count),1):
+        region_counts,region_chunks,region_failures=part
+        counts.update(region_counts); chunks+=region_chunks
+        failures.extend(region_failures[:max(0,20-len(failures))])
+        log("Entity audit [%d/%d] %s"%(regions,len(paths),rp.name))
 
     if failures:
         sample="; ".join(
@@ -3186,8 +3331,8 @@ def audit_source_entities(source: Path, tempdir: Path, log=print):
     }
 
 
-def attach_content_audit(preflight: dict, source: Path, tempdir: Path, log=print):
-    entity_audit=audit_source_entities(source,tempdir,log)
+def attach_content_audit(preflight: dict, source: Path, tempdir: Path, log=print, workers=None):
+    entity_audit=audit_source_entities(source,tempdir,log,preflight.get("terrain_entity_audit"),workers)
     content={
         "policy":CONTENT_POLICY,
         "block_entities_total":int(preflight.get("block_entities_total",0) or 0),
@@ -3313,6 +3458,122 @@ def _conversion_fingerprint(
     return _stable_hash(payload)
 
 
+def region_worker_count(requested=None,total=None):
+    """Conservative automatic cap; one selects the original in-process path."""
+    count=min(4,max(1,(os.cpu_count() or 2)-1)) if requested is None else int(requested)
+    if not 1 <= count <= 16:
+        raise ConversionError("Region workers must be between 1 and 16")
+    return min(count,max(1,total)) if total is not None else count
+
+
+_REGION_CONTEXT=None
+
+
+def _init_region_worker(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging):
+    global _REGION_CONTEXT
+    _REGION_CONTEXT=(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging)
+
+
+def _region_task(rp):
+    mode,reg,use_hbm,y_offset,strip_below_y,profile,staging=_REGION_CONTEXT
+    if mode == "entities":
+        return _audit_entity_region(rp)
+    if mode == "preflight":
+        return _scan_preflight_regions([rp],reg,use_hbm,y_offset,lambda s:None,profile)
+    return _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging)
+
+
+def _region_results(mode,regions,reg,use_hbm,y_offset,strip_below_y,profile,count,staging=None):
+    args=(mode,reg,use_hbm,y_offset,strip_below_y,profile,staging)
+    if count == 1:
+        for rp in regions:
+            if mode == "entities":
+                part=_audit_entity_region(rp)
+            elif mode == "preflight":
+                part=_scan_preflight_regions([rp],reg,use_hbm,y_offset,lambda s:None,profile)
+            else:
+                part=_convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging)
+            yield rp,part
+        return
+    # Keep submission AND completed results bounded on Python 3.11/3.12.
+    # Merge in source order for reproducible reports and failure examples.
+    with ProcessPoolExecutor(max_workers=count,mp_context=multiprocessing.get_context("spawn"),
+                             initializer=_init_region_worker,initargs=args) as pool:
+        pending=collections.deque()
+        paths=iter(regions)
+        for rp in paths:
+            pending.append((rp,pool.submit(_region_task,rp)))
+            if len(pending)>=count*2:
+                first,future=pending.popleft()
+                yield first,future.result()
+        while pending:
+            rp,future=pending.popleft()
+            yield rp,future.result()
+
+
+def _new_region_stats():
+    return {
+        "regions_converted":0,
+        "regions_verified":0,
+        "chunks_converted":0,
+        "chunks_verified":0,
+        "chunks_failed":0,
+        "chunks_cropped_above_255":0,
+        "chunks_cropped_below_0":0,
+        "lighting_source_seed_sections":0,
+        "lighting_fallback_sections":0,
+        "lighting_empty_sections_omitted":0,
+        "lighting_emitted_sections":0,
+        "block_entities_omitted":0,
+        "block_entities_synthesized":0,
+        "data_versions":collections.Counter(),
+        "palette_seen":collections.Counter(),
+        "block_entity_types_omitted":collections.Counter(),
+        "block_entity_types_synthesized":collections.Counter(),
+        "failure_counts":collections.Counter(),
+        "mapping_quality":collections.defaultdict(set),"mapping_notes":{},"failures":[],
+    }
+
+
+def _record_region_failure(report,entry):
+    report["failure_counts"][str(entry.get("error","Unknown conversion failure"))]+=1
+    if len(report["failures"])<200:
+        report["failures"].append(entry)
+
+
+def _convert_region(rp,reg,use_hbm,y_offset,strip_below_y,profile,staging):
+    report=_new_region_stats()
+    chunks={}
+    state_mapping_cache={}
+    try:
+        for idx,raw in RegionReader(rp).chunks():
+            try:
+                (cx,cz),legacy=convert_chunk(
+                    raw,reg,use_hbm,y_offset,strip_below_y,report,mapping_profile=profile,state_mapping_cache=state_mapping_cache
+                )
+                local=(cx&31)+((cz&31)*32)
+                chunks[local]=legacy
+                report["chunks_converted"]+=1
+            except Exception as exc:
+                report["chunks_failed"]+=1
+                _record_region_failure(report,{"region":rp.name,"chunk_index":idx,"error":str(exc)})
+        if chunks:
+            out_region=staging/"region"/rp.name
+            write_region(out_region,chunks)
+            verified=verify_written_region(out_region,chunks.keys())
+            report["regions_converted"]+=1
+            report["regions_verified"]+=1
+            report["chunks_verified"]+=verified
+    except Exception as exc:
+        # Region-level writer/verification problems make the staged
+        # world non-promotable even if individual chunk conversion
+        # happened to succeed.
+        _record_region_failure(report,{"region":rp.name,"error":str(exc)})
+        report["chunks_failed"]+=max(1,len(chunks))
+
+    return report
+
+
 def run_conversion_preflight(
     source,
     template,
@@ -3321,6 +3582,7 @@ def run_conversion_preflight(
     strip_below_y=0,
     catalog_snapshot=None,
     log=print,
+    workers=None,
 ):
     """Perform the exact read-only validation required before conversion.
 
@@ -3346,9 +3608,9 @@ def run_conversion_preflight(
         log("Found %d non-empty region files" % len(regions))
         log("Running read-only source/target conversion preflight...")
         preflight=preflight_source_mappings(
-            regions,reg,use_hbm,y_offset,log,mapping_profile=profile
+            regions,reg,use_hbm,y_offset,log,mapping_profile=profile,workers=workers
         )
-        attach_content_audit(preflight,source,Path(td),log)
+        attach_content_audit(preflight,source,Path(td),log,workers)
 
     fingerprint=_conversion_fingerprint(source,template,reg,profile,y_offset,strip_below_y)
     result={
@@ -3370,7 +3632,7 @@ def run_conversion_preflight(
     return result
 
 
-def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_below_y=0, log=print, catalog_snapshot=None, verified_preflight=None):
+def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_below_y=0, log=print, catalog_snapshot=None, verified_preflight=None, workers=None):
     if np is None:
         raise ConversionError("NumPy is required. Install it with: python3 -m pip install numpy")
     if y_offset%16 != 0:
@@ -3572,9 +3834,9 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
                 else:
                     log("Running source/target mapping preflight before output staging...")
                 report["preflight"]=preflight_source_mappings(
-                    regions,reg,use_hbm,y_offset,log,mapping_profile=profile
+                    regions,reg,use_hbm,y_offset,log,mapping_profile=profile,workers=workers
                 )
-                attach_content_audit(report["preflight"],source,td,log)
+                attach_content_audit(report["preflight"],source,td,log,workers)
 
             content=(report["preflight"] or {}).get("content_audit") or {}
             report["entities_omitted"]=content.get("entities_total")
@@ -3587,37 +3849,23 @@ def run_conversion(source, template, output, use_hbm=True, y_offset=0, strip_bel
             staging=_prepare_staging_output(template,output)
             log("Preflight is green; created a hidden staging clone and starting conversion.")
 
-            for ri,rp in enumerate(regions,1):
-                chunks={}
-                log("[%d/%d] %s"%(ri,len(regions),rp.name))
-                try:
-                    for idx,raw in RegionReader(rp).chunks():
-                        try:
-                            (cx,cz),legacy=convert_chunk(
-                                raw,reg,use_hbm,y_offset,strip_below_y,report,mapping_profile=profile
-                            )
-                            local=(cx&31)+((cz&31)*32)
-                            chunks[local]=legacy
-                            report["chunks_converted"]+=1
-                        except Exception as exc:
-                            report["chunks_failed"]+=1
-                            record_failure({"region":rp.name,"chunk_index":idx,"error":str(exc)})
-                            if report["chunks_failed"]<=20:
-                                log("  chunk %d FAILED: %s"%(idx,exc))
-                    if chunks:
-                        out_region=staging/"region"/rp.name
-                        write_region(out_region,chunks)
-                        verified=verify_written_region(out_region,chunks.keys())
-                        report["regions_converted"]+=1
-                        report["regions_verified"]+=1
-                        report["chunks_verified"]+=verified
-                except Exception as exc:
-                    # Region-level writer/verification problems make the staged
-                    # world non-promotable even if individual chunk conversion
-                    # happened to succeed.
-                    record_failure({"region":rp.name,"error":str(exc)})
-                    report["chunks_failed"]+=max(1,len(chunks))
-                    log("  REGION FAILED/UNVERIFIED: %s"%exc)
+            count=region_worker_count(workers,len(regions))
+            log("Conversion using %d worker process(es)"%count)
+            for ri,(rp,part) in enumerate(_region_results("convert",regions,reg,use_hbm,y_offset,strip_below_y,profile,count,staging),1):
+                for key,value in part.items():
+                    if key == "failures":
+                        report[key].extend(value[:max(0,max_failure_examples-len(report[key]))])
+                    elif key == "mapping_quality":
+                        for quality,names in value.items(): report[key][quality].update(names)
+                    elif isinstance(value,collections.Counter):
+                        report[key].update(value)
+                    elif isinstance(value,dict):
+                        for name,entry in value.items(): report[key].setdefault(name,entry)
+                    else:
+                        report[key]+=value
+                log("Convert [%d/%d] %s"%(ri,len(regions),rp.name))
+                if part["chunks_failed"]:
+                    log("  REGION FAILED/UNVERIFIED: %s"%rp.name)
 
             if report["chunks_failed"] or report["regions_verified"] != report["regions_converted"] or report["chunks_verified"] != report["chunks_converted"]:
                 report["output_promoted"]=False
@@ -3681,6 +3929,7 @@ def cli(argv=None):
     c.add_argument("--source",required=True,help="modern world folder, region folder, or region ZIP")
     c.add_argument("--template",required=True,help="saved Forge 1.7.10 world created with the exact target modpack/RTG")
     c.add_argument("--output",required=True,help="new/empty output world folder")
+    c.add_argument("--workers",type=int,default=None,help="region processes, 1..16; default automatic up to 4")
     c.add_argument("--no-hbm",action="store_true",help="do not use safe HBM architectural substitutes")
     c.add_argument("--y-offset",type=int,default=0,help="vertical shift, multiple of 16; default 0")
     c.add_argument("--strip-below-y",type=int,default=0,help="replace blocks below this target Y with stone; default 0 (preserve)")
@@ -3688,7 +3937,7 @@ def cli(argv=None):
     a.add_argument("--source",required=True); a.add_argument("--output",required=True)
     args=ap.parse_args(argv)
     if args.cmd=="convert":
-        run_conversion(args.source,args.template,args.output,not args.no_hbm,args.y_offset,args.strip_below_y)
+        run_conversion(args.source,args.template,args.output,not args.no_hbm,args.y_offset,args.strip_below_y,workers=args.workers)
     elif args.cmd=="analyze": analyze_source(args.source,args.output)
     else: ap.print_help()
 

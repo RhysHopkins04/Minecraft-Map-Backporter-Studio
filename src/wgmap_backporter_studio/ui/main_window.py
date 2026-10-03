@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 import tempfile
 import traceback
 import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QThread, Qt, Signal, Slot, QStandardPaths, QUrl
+from PySide6.QtCore import QObject, QPointF, QRectF, QThread, Qt, Signal, Slot, QStandardPaths, QUrl, QTimer
 from PySide6.QtGui import QColor, QDesktopServices, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
@@ -19,7 +21,7 @@ from PySide6.QtWidgets import (
 from .. import APP_NAME, __version__
 from ..core.catalog import load_catalog
 from ..core.jar_analyzer import analyze_jar, build_inventory_preview_spec, build_preview_spec, read_asset_bytes
-from ..core.legacy1710_engine import run_conversion, run_conversion_preflight
+from ..core.legacy1710_engine import run_conversion, run_conversion_preflight, region_worker_count
 from ..core.modpack_analyzer import analyze_modpack
 from ..core.version_targets import TARGETS
 from ..core.workspace_store import WorkspaceStore
@@ -859,6 +861,12 @@ class BackportTab(AsyncTab):
             ),
             5, 0, 1, 2,
         )
+        self.region_workers = QSpinBox()
+        self.region_workers.setRange(0, 16)
+        self.region_workers.setSpecialValueText("Automatic (%d workers)" % region_worker_count())
+        self.region_workers.setToolTip("Automatic uses up to four CPU processes. Use 1 for serial processing or lower memory use; higher counts need more RAM and disk throughput.")
+        og.addWidget(QLabel("Region workers"), 6, 0)
+        og.addWidget(self.region_workers, 6, 1)
         body.addWidget(opts)
 
         status_group = QGroupBox("Conversion preflight")
@@ -877,6 +885,19 @@ class BackportTab(AsyncTab):
         buttons.addStretch()
         buttons.addWidget(self.convert_btn)
         body.addLayout(buttons)
+
+        self.timing_status = _muted("Elapsed 00:00:00  •  Remaining —")
+        self.timing_status.setWordWrap(True)
+        body.addWidget(self.timing_status)
+        self._timing_started = None
+        self._phase_started = None
+        self._timing_running = False
+        self._phase = "Preparing"
+        self._phase_done = 0
+        self._phase_total = 0
+        self._timing_timer = QTimer(self)
+        self._timing_timer.setInterval(1000)
+        self._timing_timer.timeout.connect(self._refresh_timing)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
@@ -1007,7 +1028,51 @@ class BackportTab(AsyncTab):
         self.scan_btn.setEnabled((not busy) and backend_ready)
         self.convert_btn.setEnabled((not busy) and backend_ready and self._preflight_valid())
 
+    @staticmethod
+    def _duration(seconds):
+        seconds=max(0,int(seconds))
+        hours,seconds=divmod(seconds,3600)
+        minutes,seconds=divmod(seconds,60)
+        return "%02d:%02d:%02d"%(hours,minutes,seconds)
+
+    def _refresh_timing(self):
+        if self._timing_started is None:
+            return
+        now=time.monotonic()
+        if self._timing_running:
+            self._elapsed=now-self._timing_started
+        text="Elapsed %s"%self._duration(self._elapsed)
+        if not self._timing_running:
+            text += "  •  Stopped"
+        elif self._phase_done and self._phase_total:
+            age=max(0.001,now-self._phase_started)
+            rate=self._phase_done/age
+            if self._phase_done < self._phase_total:
+                remaining=(self._phase_total-self._phase_done)/rate
+                text += "  •  Estimated remaining %s (%s regions)  •  %.2f regions/s"%(self._duration(remaining),self._phase.lower(),rate)
+            else:
+                text += "  •  Finalizing / awaiting next phase…"
+            text += "  •  %s %s / %s"%(self._phase,format(self._phase_done,","),format(self._phase_total,","))
+        else:
+            text += "  •  %s… estimating after completed regions"%self._phase
+        self.timing_status.setText(text)
+
     def _set_busy(self, busy: bool):
+        self.region_workers.setEnabled(not busy)
+        if busy:
+            self._timing_started=time.monotonic()
+            self._phase_started=self._timing_started
+            self._elapsed=0
+            self._phase="Preparing"
+            self._phase_done=self._phase_total=0
+            self._timing_running=True
+            self._timing_timer.start()
+        else:
+            if self._timing_running:
+                self._elapsed=time.monotonic()-self._timing_started
+            self._timing_running=False
+            self._timing_timer.stop()
+        self._refresh_timing()
         self.scan_btn.setEnabled(not busy)
         self.convert_btn.setEnabled((not busy) and self.version.currentData().backend is not None and self._preflight_valid())
         self.progress.setRange(0, 0 if busy else 1)
@@ -1015,7 +1080,23 @@ class BackportTab(AsyncTab):
             self.progress.setValue(1)
 
     def _log(self, s):
-        self.log.appendPlainText(str(s))
+        line=str(s)
+        self.log.appendPlainText(line)
+        match=re.match(r"(Preflight|Convert|Entity audit) \[(\d+)/(\d+)\]",line)
+        if self._timing_running and match:
+            phase,done,total=match.groups()
+            if phase != self._phase:
+                self._phase=phase
+                self._phase_started=time.monotonic()
+            self._phase_done,self._phase_total=int(done),int(total)
+            self.progress.setRange(0,self._phase_total)
+            self.progress.setValue(self._phase_done)
+            self._refresh_timing()
+        elif self._timing_running and "using" in line and "worker process(es)" in line:
+            self._phase=line.split(" using",1)[0].replace("Conversion","Convert")
+            self._phase_started=time.monotonic()
+            self._phase_done=self._phase_total=0
+            self._refresh_timing()
 
     def scan_source(self):
         t = self.version.currentData()
@@ -1041,6 +1122,7 @@ class BackportTab(AsyncTab):
         allow_safe = self.hbm.isChecked()
         yoff = self.yoff.value()
         strip = self.strip.value()
+        workers = self.region_workers.value() or None
 
         self.log.clear()
         self._preflight_result = None
@@ -1057,6 +1139,7 @@ class BackportTab(AsyncTab):
                 strip,
                 catalog_snapshot=snapshot,
                 log=log,
+                workers=workers,
             )
 
         def done(rep):
@@ -1187,6 +1270,7 @@ class BackportTab(AsyncTab):
         allow_safe = self.hbm.isChecked()
         yoff = self.yoff.value()
         strip = self.strip.value()
+        workers = self.region_workers.value() or None
 
         self.log.clear()
         self._set_busy(True)
@@ -1202,6 +1286,7 @@ class BackportTab(AsyncTab):
                 log,
                 catalog_snapshot=snapshot,
                 verified_preflight=verified,
+                workers=workers,
             )
 
         def done(rep):
