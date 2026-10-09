@@ -1422,6 +1422,27 @@ def _etfuturum_state_meta(path, props):
         exact=direction in {"up","down"} and shape in thickness and _only_default_runtime_props(
             props,{"waterlogged":"false"},ignored={"thickness","vertical_direction"})
         return thickness.get(shape,0) + (5 if direction=="up" else 0), exact
+    if p == "small_dripleaf":
+        half=str(props.get("half","lower")).lower()
+        facing=str(props.get("facing","north")).lower()
+        wet=boolprop(props,"waterlogged")
+        meta=_horizontal_quadrant(props) | (4 if half=="upper" else 0) | (8 if wet else 0)
+        exact=half in {"upper","lower"} and facing in {"north","south","east","west"} and _only_default_runtime_props(
+            props,ignored={"half","facing","waterlogged"})
+        return meta,exact
+    if p == "big_dripleaf_stem":
+        facing=str(props.get("facing","north")).lower()
+        wet=boolprop(props,"waterlogged")
+        exact=facing in {"north","east","south","west"} and _only_default_runtime_props(
+            props,ignored={"facing","waterlogged"})
+        return _horizontal_quadrant(props) | (4 if wet else 0),exact
+    if p == "big_dripleaf":
+        facing=str(props.get("facing","north")).lower()
+        tilt=str(props.get("tilt","none")).lower()
+        tilts={"none":0,"unstable":1,"partial":2,"full":3}
+        exact=facing in {"north","east","south","west"} and tilt in tilts and _only_default_runtime_props(
+            props,ignored={"facing","tilt","waterlogged"})
+        return _horizontal_quadrant(props) | (tilts.get(tilt,0)<<2),exact
     if p == "tall_seagrass":
         half=str(props.get("half","lower")).lower()
         return (1 if half=="upper" else 0), half in {"lower","upper"} and _only_default_runtime_props(props,ignored={"half"})
@@ -1859,6 +1880,16 @@ def _map_etfuturum_first(name, props, reg: TargetRegistry):
         return Mapping(target,(age & 15) if compact else 0,"backport_exact" if exact else "backport_close",
                        "EFR compact kelp age metadata" if compact else "EFR legacy kelp Age BYTE tile state; use updated EFR for map-scale imports")
 
+    # A big-dripleaf top already uses all four metadata bits for facing and tilt.
+    # Its waterlogged variant has its own EFR registry identity; never pretend the
+    # older dry-only target preserves source water.
+    if p == "big_dripleaf" and boolprop(props or {},"waterlogged"):
+        wet_target = "etfuturum:big_dripleaf_wet"
+        if reg.resolve(wet_target) is not None:
+            meta,exact=_etfuturum_state_meta(p,props or {})
+            return Mapping(wet_target,meta,"backport_exact" if exact else "backport_close",
+                           "EFR waterlogged big-dripleaf top with facing/tilt metadata")
+
     # Furnace-like EFR blocks retain separate lit/unlit 1.7.10 registry IDs.
     # Prefer the lit identity when the modern state says lit and the selected
     # target registry actually contains that concrete block.
@@ -1895,6 +1926,12 @@ def _map_etfuturum_first(name, props, reg: TargetRegistry):
     direct=_etfuturum_registry_name(p)
     if reg.resolve(direct) is not None:
         meta,state_exact=_etfuturum_state_meta(p,props or {})
+        if p in {"small_dripleaf","big_dripleaf_stem"} and boolprop(props or {},"waterlogged") \
+                and reg.resolve("etfuturum:big_dripleaf_wet") is None:
+            # The wet metadata bits were introduced together with the hidden
+            # big-dripleaf wet ID. Old EFR installations must not inherit them.
+            meta &= ~(8 if p == "small_dripleaf" else 4)
+            state_exact = False
         quality="backport_exact" if state_exact else "backport_close"
         note="Et Futurum target detected directly in the selected target registry (Forge 1.7.10)"
         if not state_exact:
@@ -1908,8 +1945,13 @@ def map_modern(name, props, reg: TargetRegistry, use_hbm=True, mapping_profile: 
     mapped = _map_modern_impl(name, props, reg, use_hbm, mapping_profile)
     if boolprop(props or {}, "waterlogged"):
         target = mapped.target.lower()
-        bounded = target in {"etfuturum:kelp", "etfuturum:kelp_age_16", "etfuturum:kelp_plant", "etfuturum:seagrass", "etfuturum:tall_seagrass", "etfuturum:sea_pickle"} or (
+        bounded = target in {"etfuturum:kelp", "etfuturum:kelp_age_16", "etfuturum:kelp_plant", "etfuturum:seagrass", "etfuturum:tall_seagrass", "etfuturum:sea_pickle",
+                         "etfuturum:small_dripleaf", "etfuturum:big_dripleaf_stem", "etfuturum:big_dripleaf_wet"} or (
             target.startswith("etfuturum:") and target.endswith(("_coral", "_coral_fan", "_coral_wall_fan")))
+        # The new waterlogging layouts must not be claimed for older EFR
+        # builds just because they expose the same small-dripleaf/stem identity.
+        if target in {"etfuturum:small_dripleaf","etfuturum:big_dripleaf_stem"}:
+            bounded = bounded and reg.resolve("etfuturum:big_dripleaf_wet") is not None
         if not bounded and mapped.quality in {"exact", "backport_exact"}:
             mapped = Mapping(mapped.target, mapped.meta, "backport_close" if mapped.quality == "backport_exact" else "approximate",
                              mapped.note + "; source waterlogged state is unsupported by this target")
@@ -1953,6 +1995,17 @@ def _map_modern_impl(name, props, reg: TargetRegistry, use_hbm=True, mapping_pro
         etfuturum_mapping=_map_etfuturum_first(name,props or {},reg)
         if etfuturum_mapping is not None:
             return etfuturum_mapping
+
+    # Cocoa exists in vanilla 1.7.10. Low bits are legacy attachment direction
+    # (south=0,west=1,north=2,east=3); high bits are growth age 0..2.
+    if p == "cocoa" and name == "minecraft:cocoa":
+        facing=str((props or {}).get("facing","north")).lower()
+        age=intprop(props or {},"age",0,0,2)
+        m={"south":0,"west":1,"north":2,"east":3}.get(facing,2) | (age<<2)
+        exact=facing in {"north","south","west","east"} and _only_default_runtime_props(
+            props or {},ignored={"facing","age"})
+        return V("minecraft:cocoa",m,"exact" if exact else "approximate",
+                 "Legacy 1.7.10 cocoa attachment/facing and growth metadata")
 
     # Exact pre-flattening aliases that do not require a backport provider.
     # These must run before generic/catalog fallbacks because the modern names
